@@ -2,6 +2,7 @@ function createPlugin(host) {
   const service = "0000ff08-0000-1000-8000-00805f9b34fb";
   const weightCharacteristic = "0000ef81-0000-1000-8000-00805f9b34fb";
   const commandCharacteristic = "0000ef80-0000-1000-8000-00805f9b34fb";
+  const buttonCharacteristic = "0000ef82-0000-1000-8000-00805f9b34fb";
   const batteryService = "0000180f-0000-1000-8000-00805f9b34fb";
   const batteryCharacteristic = "00002a19-0000-1000-8000-00805f9b34fb";
   const deviceInformationService = "0000180a-0000-1000-8000-00805f9b34fb";
@@ -14,6 +15,7 @@ function createPlugin(host) {
   const instanceControls = new Map();
   const pendingStorageReads = new Map();
   const pendingStorageWrites = new Map();
+  let storageWriteQueue = Promise.resolve();
 
   function settingKey(deviceId) {
     return "skale.reaplugin.device." + deviceId;
@@ -163,14 +165,16 @@ load();
 
   async function saveSettings(deviceId, value) {
     return queueSettings(deviceId, async () => {
-      await new Promise((resolve, reject) => {
+      const write = storageWriteQueue.catch(() => {}).then(() => new Promise((resolve, reject) => {
         const key = settingKey(deviceId);
         pendingStorageWrites.set(key, {resolve, reject});
         try { host.storage({type: "write", key, data: value}); } catch (error) {
           pendingStorageWrites.delete(key);
           reject(error);
         }
-      });
+      }));
+      storageWriteQueue = write.catch(() => {});
+      await write;
       deviceSettings.set(deviceId, value);
     });
   }
@@ -246,9 +250,15 @@ load();
         pendingStorageReads.delete(event.payload.key);
         if (pending) pending.resolve(event.payload.value);
       } else if (event.name === "storageWrite") {
-        const pending = pendingStorageWrites.get(event.payload.key);
-        pendingStorageWrites.delete(event.payload.key);
-        if (pending) pending.resolve();
+        // The current host acknowledgement carries the stored value, not the
+        // key. Storage operations are serialized per device, so acknowledge
+        // the oldest outstanding write in host delivery order.
+        const next = pendingStorageWrites.entries().next();
+        if (!next.done) {
+          const [key, pending] = next.value;
+          pendingStorageWrites.delete(key);
+          pending.resolve();
+        }
       }
     },
     onLoad() {
@@ -436,6 +446,20 @@ load();
                     if (isActive(state)) fail(state, new Error("Skale weight publication failed"));
                   }
                 });
+                try {
+                  await session.gatt.subscribe(service, buttonCharacteristic, async data => {
+                    const button = decodeBase64(data);
+                    if (!isActive(state) || !button || button.length !== 1 || button[0] !== 0x01) return;
+                    try {
+                      await command([0x10]);
+                    } catch (error) {
+                      if (isActive(state)) fail(state, error);
+                      throw error;
+                    }
+                  });
+                } catch (_) {
+                  // Older firmware may omit the button characteristic; weight remains usable.
+                }
                 await delay();
                 if (!isActive(state)) throw new Error("Skale session retired");
                 await session.gatt.writeWithoutResponse(service, commandCharacteristic, encode([0xed]));
@@ -517,6 +541,7 @@ load();
       for (const pending of pendingStorageWrites.values()) pending.reject(new Error("Skale plugin unloaded"));
       pendingStorageReads.clear();
       pendingStorageWrites.clear();
+      storageWriteQueue = Promise.resolve();
     },
   };
 }

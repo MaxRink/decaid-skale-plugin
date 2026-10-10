@@ -47,9 +47,12 @@ The plugin supports the current host contract:
   `pluginStorage` KV store.
 
 USB power is a manual, default-off declaration. It suppresses battery reads and
-publishes `batteryLevel: null`; it is not sensed power. Physical brew-button
-actions are intentionally absent and remain subject to the held host action
-review (#845/#853).
+publishes `batteryLevel: null`; it is not sensed power. The Skale circle button
+notification (`ef82`, payload `0x01`) performs a local scale tare and is fenced to
+that BLE session. Square (`0x02`) and unknown or malformed button payloads are
+ignored. Square machine actions remain subject to the held host action review
+(#845/#853). Button command write failures propagate through the host BLE session;
+missing button subscription is tolerated so weight remains usable.
 
 ## Development
 
@@ -61,8 +64,11 @@ npm run package
 GitHub Actions runs the protocol/session suite and package-root checks on Node
 22 and 24 LTS plus Node 26 Current. A focused host-contract job runs Decaid's
 real package resolver and manifest parser against both a GitHub-style source
-archive and the generated local ZIP, pinned to host revision
-`af4e99524ad7731dbdb7db4540cd272bc91da038`.
+archive and the generated local ZIP, then runs `ci/host_runtime_test.dart` inside
+the pinned host QuickJS runtime with fake GATT transports. It covers multi-binding
+isolation, settings/pluginStorage persistence, nullable metadata, commands, circle
+tare, ignored square/unknown buttons, write failures, and late-event fencing.
+The host is pinned to revision `af4e99524ad7731dbdb7db4540cd272bc91da038`.
 
 The package is a ZIP containing only the manifest, plugin source, README and
 GPL-3.0 license. The generated ZIP is not a release or a hardware-validation

@@ -95,3 +95,10 @@ jobs:
       - name: Run host package boundary tests
         working-directory: decaid-host
         run: flutter test test/plugins/plugin_package_test.dart test/plugins/plugin_manifest_permissions_test.dart
+      - name: Copy durable plugin runtime harness
+        run: cp ci/host_runtime_test.dart decaid-host/test/plugins/skale_external_runtime_test.dart
+      - name: Run real host plugin runtime harness
+        working-directory: decaid-host
+        env:
+          SKALE_PLUGIN_ROOT: ${{ github.workspace }}
+        run: flutter test --no-pub test/plugins/skale_external_runtime_test.dart --reporter expanded
