@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  javascript:
+    name: Node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 22 and 24 are supported LTS lines; 26 is the current line.
+        node: [22.x, 24.x, 26.x]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - name: Install Node dependencies
+        run: npm ci
+      - name: Syntax check
+        run: node --check plugin.js
+      - name: Run protocol and session tests
+        run: npm test
+      - name: Build installable package
+        run: npm run package
+      - name: Check package root
+        shell: bash
+        run: |
+          expected=$'LICENSE\nNOTICE\nREADME.md\nmanifest.json\nplugin.js'
+          actual=$(unzip -Z1 dist/decaid-skale-plugin-0.2.0.zip | sort)
+          test "$actual" = "$expected"
+      - name: Upload package artifact
+        if: matrix.node == '24.x'
+        uses: actions/upload-artifact@v4
+        with:
+          name: decaid-skale-plugin-${{ github.sha }}
+          path: dist/decaid-skale-plugin-0.2.0.zip
+          if-no-files-found: error
+
+  host-contract:
+    name: Pinned Decaid host contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Checkout pinned Decaid host
+        uses: actions/checkout@v5
+        with:
+          repository: decentespresso/decaid
+          ref: af4e99524ad7731dbdb7db4540cd272bc91da038
+          path: decaid-host
+          fetch-depth: 1
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.44.2
+          cache: true
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24.x
+          cache: npm
+      - name: Install host dependencies
+        working-directory: decaid-host
+        run: flutter pub get
+      - name: Stub host bundled assets needed by Flutter test bootstrap
+        working-directory: decaid-host
+        run: |
+          mkdir -p assets/bundled_skins
+          printf '["stub-skin"]\n' > assets/bundled_skins/manifest.json
+          : > assets/bundled_skins/stub-skin.zip
+      - name: Add external package contract probe
+        run: cp ci/validate-host-contract.dart decaid-host/tool/validate-skale-contract.dart
+      - name: Build local install package
+        run: npm ci && npm run package
+      - name: Stage GitHub archive layout
+        run: |
+          mkdir -p source-archive local-zip
+          git archive --format=zip --prefix=decaid-skale-plugin-main/ HEAD > /tmp/skale-source.zip
+          unzip -q /tmp/skale-source.zip -d source-archive
+          unzip -q dist/decaid-skale-plugin-0.2.0.zip -d local-zip
+      - name: Parse GitHub archive with the real host loader
+        run: dart run tool/validate-skale-contract.dart "$GITHUB_WORKSPACE/source-archive"
+        working-directory: decaid-host
+      - name: Parse local ZIP with the real host loader
+        run: dart run tool/validate-skale-contract.dart "$GITHUB_WORKSPACE/local-zip"
+        working-directory: decaid-host
+      - name: Run host package boundary tests
+        working-directory: decaid-host
+        run: flutter test test/plugins/plugin_package_test.dart test/plugins/plugin_manifest_permissions_test.dart

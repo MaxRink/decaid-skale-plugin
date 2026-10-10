@@ -58,6 +58,12 @@ npm test
 npm run package
 ```
 
+GitHub Actions runs the protocol/session suite and package-root checks on Node
+22 and 24 LTS plus Node 26 Current. A focused host-contract job runs Decaid's
+real package resolver and manifest parser against both a GitHub-style source
+archive and the generated local ZIP, pinned to host revision
+`af4e99524ad7731dbdb7db4540cd272bc91da038`.
+
 The package is a ZIP containing only the manifest, plugin source, README and
 GPL-3.0 license. The generated ZIP is not a release or a hardware-validation
 claim.
