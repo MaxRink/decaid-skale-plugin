@@ -5,6 +5,36 @@ runtime-v2 plugin API. The host bundle contains `manifest.json` and
 root-level `plugin.js`. Use the ZIP produced by `npm run package` for
 installation.
 
+## Installation
+
+This plugin requires a Decaid build containing the runtime-v2 plugin contract:
+BLE `bindDriver`, four-binding admission, session `publishInfo`, validated
+driver `surfaces`, and `pluginStorage`. The contract was present on Decaid
+main at `af4e99524ad7731dbdb7db4540cd272bc91da038` (2026-10-10). The stable
+`0.8.8` release predates the final settings-surface and Scale metadata pieces;
+use a newer host build and check its plugin documentation before installing.
+
+Decaid can install this repository directly from its GitHub branch installer:
+
+```text
+Repository: MaxRink/decaid-skale-plugin
+Branch:     main
+```
+
+That installer downloads the branch archive, finds the single directory that
+contains `manifest.json` and `plugin.js`, validates the manifest, and records
+the resolved commit as the plugin source. A local install can use
+`dist/decaid-skale-plugin-0.2.0.zip` through the local ZIP installer. The ZIP
+has those two required files at its root. There is currently no GitHub release
+asset; the release installer should only be used after a semver-matching ZIP
+release is published.
+
+The plugin id is `skale.reaplugin`. After installation, enable it in Decaid's
+plugin management UI and grant the requested BLE, API, and plugin-storage
+permissions. The settings action is provided by the declared `settings`
+surface; its `deviceId` and optional display name are supplied by Decaid's
+device-management authority.
+
 The plugin supports the current host contract:
 
 - host-owned BLE with up to four independently fenced bindings;
