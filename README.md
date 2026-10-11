@@ -61,6 +61,19 @@ npm test
 npm run package
 ```
 
+Browser contract checks use a fake GATT session and Playwright Chromium; they do
+not require a physical scale:
+
+```bash
+npm ci
+npx playwright install --with-deps chromium
+npm run test:browser
+```
+
+The browser suite covers the settings page, persisted USB-power reload,
+malformed settings rejection, weight publication, tare, and circle-button tare.
+CI runs it on Node 24 alongside the native Node matrix.
+
 GitHub Actions runs the protocol/session suite and package-root checks on Node
 22 and 24 LTS plus Node 26 Current. A focused host-contract job runs Decaid's
 real package resolver and manifest parser against both a GitHub-style source
