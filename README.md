@@ -104,3 +104,17 @@ and PR #859 head `4816cf02a42b6c9b0f2aea897054044afb8d360e` on 2026-10-10.
 No physical hardware run is included. Host platform trust and plugin transport
 permissions still apply. Self-signed TLS is unrelated to this BLE plugin and
 must be solved in the host/E64 plugin separately.
+
+## Releases
+
+Install the latest [GitHub release](https://github.com/MaxRink/decaid-skale-plugin/releases)
+through Decaid’s plugin installer. Each release has exactly one flat ZIP with the
+manifest, runtime plugin and licence notices. The tag must match the manifest
+version. Subsequent releases require a version bump in the manifest, package and
+lockfile.
+
+The tag-triggered release workflow reruns the complete repository CI and publishes
+the tested archive only after all jobs pass. `npm run package` produces a
+deterministic archive under `dist/`; documentation, mocks and CI fixtures remain
+in the repository. CI proves synthetic software behavior, not physical hardware
+or firmware compatibility.

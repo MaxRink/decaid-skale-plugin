@@ -5,6 +5,7 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
@@ -32,18 +33,13 @@ jobs:
         run: npm test
       - name: Build installable package
         run: npm run package
-      - name: Check package root
-        shell: bash
-        run: |
-          expected=$'LICENSE\nNOTICE\nREADME.md\nmanifest.json\nplugin.js'
-          actual=$(unzip -Z1 dist/decaid-skale-plugin-0.2.0.zip | sort)
-          test "$actual" = "$expected"
+      - run: python3 -m unittest discover -s test -p package_plugin_test.py
       - name: Upload package artifact
         if: matrix.node == '24.x'
         uses: actions/upload-artifact@v4
         with:
           name: decaid-skale-plugin-${{ github.sha }}
-          path: dist/decaid-skale-plugin-0.2.0.zip
+          path: dist/*.zip
           if-no-files-found: error
 
   playwright:
@@ -107,7 +103,7 @@ jobs:
           mkdir -p source-archive local-zip
           git archive --format=zip --prefix=decaid-skale-plugin-main/ HEAD > /tmp/skale-source.zip
           unzip -q /tmp/skale-source.zip -d source-archive
-          unzip -q dist/decaid-skale-plugin-0.2.0.zip -d local-zip
+          unzip -q dist/*.zip -d local-zip
       - name: Parse GitHub archive with the real host loader
         run: dart run tool/validate-skale-contract.dart "$GITHUB_WORKSPACE/source-archive"
         working-directory: decaid-host

@@ -6,7 +6,7 @@
   "scripts": {
     "test": "node --test test/plugin.test.js",
     "test:browser": "playwright test test/playwright.test.js",
-    "package": "rm -rf .package && mkdir .package && cp manifest.json plugin.js README.md NOTICE LICENSE .package/ && mkdir -p dist && (cd .package && zip -q -r ../dist/decaid-skale-plugin-0.2.0.zip manifest.json plugin.js README.md NOTICE LICENSE)"
+    "package": "python3 scripts/package-plugin.py"
   },
   "license": "GPL-3.0-or-later",
   "devDependencies": {
