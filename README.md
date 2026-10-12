@@ -23,11 +23,11 @@ Branch:     main
 
 That installer downloads the branch archive, finds the single directory that
 contains `manifest.json` and `plugin.js`, validates the manifest, and records
-the resolved commit as the plugin source. A local install can use
-`dist/decaid-skale-plugin-0.2.0.zip` through the local ZIP installer. The ZIP
-has those two required files at its root. There is currently no GitHub release
-asset; the release installer should only be used after a semver-matching ZIP
-release is published.
+the resolved commit as the plugin source. For stable installs, select the latest
+[GitHub release](https://github.com/MaxRink/decaid-skale-plugin/releases), whose
+single ZIP matches the manifest version. A local build can use
+`dist/decaid-skale-plugin-<version>.zip` through the local ZIP installer. The ZIP
+has the required runtime files and licence notices at its root.
 
 The plugin id is `skale.reaplugin`. After installation, enable it in Decaid's
 plugin management UI and grant the requested BLE, API, and plugin-storage
