@@ -7,11 +7,11 @@ body:
     id: scope
     attributes:
       label: Affected area
+      description: Skale plugin, Bluetooth protocol, and fake-GATT/mock-device scope.
       options:
-        - Plugin
-        - Simulator or website
-        - Collector
-        - Dashboard
+        - Skale Bluetooth plugin
+        - Fake-GATT/mock device
+        - Host compatibility
         - Other
     validations:
       required: true
