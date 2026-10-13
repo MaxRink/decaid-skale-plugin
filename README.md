@@ -10,7 +10,7 @@ installation.
 This plugin requires a Decaid build containing the runtime-v2 plugin contract:
 BLE `bindDriver`, four-binding admission, session `publishInfo`, validated
 driver `surfaces`, and `pluginStorage`. The contract was present on Decaid
-main at `af4e99524ad7731dbdb7db4540cd272bc91da038` (2026-10-10). The stable
+main at `bafa9b3f2b90e65334e990b0b9601a9965cf979b` (2026-10-13). The stable
 `0.8.8` release predates the final settings-surface and Scale metadata pieces;
 use a newer host build and check its plugin documentation before installing.
 
@@ -81,7 +81,7 @@ archive and the generated local ZIP, then runs `ci/host_runtime_test.dart` insid
 the pinned host QuickJS runtime with fake GATT transports. It covers multi-binding
 isolation, settings/pluginStorage persistence, nullable metadata, commands, circle
 tare, ignored square/unknown buttons, write failures, and late-event fencing.
-The host is pinned to revision `af4e99524ad7731dbdb7db4540cd272bc91da038`.
+The host is pinned to revision `bafa9b3f2b90e65334e990b0b9601a9965cf979b`.
 
 The package is a ZIP containing only the manifest, plugin source, README and
 GPL-3.0 license. The generated ZIP is not a release or a hardware-validation
@@ -96,8 +96,9 @@ reworked to use the accepted current `surfaces` contract and retains the
 original copyright and contribution history in `NOTICE`. The Decaid host is
 GPL-3.0-or-later; this plugin is distributed under the same license.
 
-The source references were inspected at Decaid main `af4e99524ad7731dbdb7db4540cd272bc91da038`
-and PR #859 head `4816cf02a42b6c9b0f2aea897054044afb8d360e` on 2026-10-10.
+The source references were inspected at Decaid main `bafa9b3f2b90e65334e990b0b9601a9965cf979b`
+and the closed PR #859 head `4816cf02a42b6c9b0f2aea897054044afb8d360e` on 2026-10-10;
+the current main pin above is the contract used by CI.
 
 ## Limitations
 
