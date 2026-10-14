@@ -3,7 +3,7 @@
   "name": "Skale Scale",
   "author": "Maximilian Rink and Decaid contributors",
   "description": "Opt-in Skale BLE scale driver using the Decaid host runtime.",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "apiVersion": 1,
   "permissions": ["transport.ble", "api", "pluginStorage"],
   "drivers": [{

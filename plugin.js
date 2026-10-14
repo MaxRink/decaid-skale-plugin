@@ -14,8 +14,14 @@ function createPlugin(host) {
   const settingsOperations = new Map();
   const instanceControls = new Map();
   const pendingStorageReads = new Map();
-  const pendingStorageWrites = new Map();
+  const pendingStorageWrites = [];
+  const failedStorageReads = new Set();
+  // Host storage is asynchronous (Hive/open-box and put); keep the deadline
+  // bounded without treating a normal slow disk as an unrecoverable fault.
+  const storageAckTimeout = 5000;
   let storageWriteQueue = Promise.resolve();
+  let storageWriteFailure = null;
+  let unloaded = false;
 
   function settingKey(deviceId) {
     return "skale.reaplugin.device." + deviceId;
@@ -71,6 +77,7 @@ async function load() {
   const generation = ++loadGeneration;
   loaded = false;
   save.disabled = true;
+  usbPower.disabled = true;
   if (!id) {
     status.textContent = "Device unavailable";
     return;
@@ -84,6 +91,7 @@ async function load() {
     usbPower.checked = value.usbPower === true;
     loaded = true;
     save.disabled = false;
+    usbPower.disabled = false;
     status.textContent = "";
   } catch (error) {
     if (generation === loadGeneration) status.textContent = error.message;
@@ -95,6 +103,7 @@ form.addEventListener("submit", async event => {
   if (!loaded) return;
   status.textContent = "";
   save.disabled = true;
+  usbPower.disabled = true;
   try {
     const response = await fetch("device-settings?deviceId=" + encodeURIComponent(deviceId.value), {
       method: "POST", headers: {"Content-Type": "application/json"},
@@ -105,7 +114,8 @@ form.addEventListener("submit", async event => {
   } catch (error) {
     status.textContent = error.message;
   } finally {
-    if (loaded) save.disabled = false;
+    save.disabled = !loaded;
+    usbPower.disabled = !loaded;
   }
 });
 deviceId.addEventListener("change", load);
@@ -130,17 +140,39 @@ load();
     });
   }
 
+  function storageError(message) {
+    return new Error("Skale storage unavailable: " + message);
+  }
+
+  function failCachedSettings() {
+    for (const deviceId of deviceSettings.keys()) {
+      failedStorageReads.add(settingKey(deviceId));
+    }
+    deviceSettings.clear();
+  }
+
   async function loadSettings(deviceId) {
     return queueSettings(deviceId, async () => {
+      if (unloaded) return {value: null, known: false};
+      const key = settingKey(deviceId);
+      if (failedStorageReads.has(key)) {
+        return {value: null, known: false};
+      }
       if (deviceSettings.has(deviceId)) {
         return {value: deviceSettings.get(deviceId), known: true};
       }
       try {
         const stored = await new Promise((resolve, reject) => {
-          const key = settingKey(deviceId);
-          pendingStorageReads.set(key, {resolve, reject});
-          try { host.storage({type: "read", key}); } catch (error) {
+          const timer = setTimeout(() => {
             pendingStorageReads.delete(key);
+            failedStorageReads.add(key);
+            reject(storageError("read acknowledgement timed out"));
+          }, storageAckTimeout);
+          pendingStorageReads.set(key, {resolve, reject, timer});
+          try { host.storage({type: "read", key}); } catch (error) {
+            clearTimeout(timer);
+            pendingStorageReads.delete(key);
+            failedStorageReads.add(key);
             reject(error);
           }
         });
@@ -165,14 +197,40 @@ load();
 
   async function saveSettings(deviceId, value) {
     return queueSettings(deviceId, async () => {
-      const write = storageWriteQueue.catch(() => {}).then(() => new Promise((resolve, reject) => {
+      if (unloaded) throw storageError("plugin unloaded; create a new instance to retry");
+      if (storageWriteFailure) throw storageWriteFailure;
+      const write = storageWriteQueue.catch(() => {}).then(() => {
+        if (storageWriteFailure) throw storageWriteFailure;
+        return new Promise((resolve, reject) => {
         const key = settingKey(deviceId);
-        pendingStorageWrites.set(key, {resolve, reject});
+        const pending = {deviceId, resolve, reject, timer: null};
+        pending.timer = setTimeout(() => {
+          const index = pendingStorageWrites.indexOf(pending);
+          if (index >= 0) pendingStorageWrites.splice(index, 1);
+          const error = storageError("write acknowledgement timed out");
+          storageWriteFailure = error;
+          failCachedSettings();
+          failedStorageReads.add(settingKey(deviceId));
+          while (pendingStorageWrites.length > 0) {
+            const abandoned = pendingStorageWrites.shift();
+            failedStorageReads.add(settingKey(abandoned.deviceId));
+            clearTimeout(abandoned.timer);
+            abandoned.reject(error);
+          }
+          reject(error);
+        }, storageAckTimeout);
+        pendingStorageWrites.push(pending);
         try { host.storage({type: "write", key, data: value}); } catch (error) {
-          pendingStorageWrites.delete(key);
+          clearTimeout(pending.timer);
+          const index = pendingStorageWrites.indexOf(pending);
+          if (index >= 0) pendingStorageWrites.splice(index, 1);
+          storageWriteFailure = error;
+          failCachedSettings();
+          failedStorageReads.add(key);
           reject(error);
         }
-      }));
+        });
+      });
       storageWriteQueue = write.catch(() => {});
       await write;
       deviceSettings.set(deviceId, value);
@@ -245,23 +303,25 @@ load();
   return {
     id: "skale.reaplugin",
     onEvent(event) {
+      if (unloaded) return;
       if (event.name === "storageRead") {
         const pending = pendingStorageReads.get(event.payload.key);
-        pendingStorageReads.delete(event.payload.key);
-        if (pending) pending.resolve(event.payload.value);
+        if (pending) {
+          pendingStorageReads.delete(event.payload.key);
+          clearTimeout(pending.timer);
+          pending.resolve(event.payload.value);
+        }
       } else if (event.name === "storageWrite") {
-        // The current host acknowledgement carries the stored value, not the
-        // key. Storage operations are serialized per device, so acknowledge
-        // the oldest outstanding write in host delivery order.
-        const next = pendingStorageWrites.entries().next();
-        if (!next.done) {
-          const [key, pending] = next.value;
-          pendingStorageWrites.delete(key);
+        if (storageWriteFailure) return;
+        const pending = pendingStorageWrites.shift();
+        if (pending) {
+          clearTimeout(pending.timer);
           pending.resolve();
         }
       }
     },
     onLoad() {
+      unloaded = false;
       return host.devices.bindDriver("skale", {
         create(device) {
           const deviceId = device && typeof device.id === "string" ? device.id : "";
@@ -534,13 +594,22 @@ load();
       }).catch(() => jsonResponse(502, {error: "settings persistence failed"}));
     },
     onUnload() {
+      unloaded = true;
       instanceControls.clear();
       deviceSettings.clear();
       settingsOperations.clear();
-      for (const pending of pendingStorageReads.values()) pending.reject(new Error("Skale plugin unloaded"));
-      for (const pending of pendingStorageWrites.values()) pending.reject(new Error("Skale plugin unloaded"));
+      for (const pending of pendingStorageReads.values()) {
+        clearTimeout(pending.timer);
+        pending.reject(new Error("Skale plugin unloaded"));
+      }
+      for (const pending of pendingStorageWrites) {
+        clearTimeout(pending.timer);
+        pending.reject(new Error("Skale plugin unloaded"));
+      }
       pendingStorageReads.clear();
-      pendingStorageWrites.clear();
+      pendingStorageWrites.length = 0;
+      failedStorageReads.clear();
+      storageWriteFailure = storageError("plugin unloaded; create a new instance to retry");
       storageWriteQueue = Promise.resolve();
     },
   };

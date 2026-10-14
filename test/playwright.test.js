@@ -17,6 +17,8 @@ let session;
 let weightCallback;
 let buttonCallback;
 const store = new Map();
+let deferWriteAcks = false;
+const deferredWriteAcks = [];
 const state = {weight: null, infos: [], writes: []};
 
 function response(res, status, body, headers = {'content-type': 'application/json'}) {
@@ -28,8 +30,10 @@ test.beforeAll(async () => {
   const host = {
     devices: {bindDriver(_id, driver) { host.driver = driver; }},
     storage(request) {
-      queueMicrotask(() => plugin.onEvent({name: request.type === 'read' ? 'storageRead' : 'storageWrite', payload: {key: request.key, value: store.get(request.key)}}));
       if (request.type === 'write') store.set(request.key, request.data);
+      const acknowledge = () => queueMicrotask(() => plugin.onEvent({name: request.type === 'read' ? 'storageRead' : 'storageWrite', payload: {key: request.key, value: store.get(request.key)}}));
+      if (request.type === 'write' && deferWriteAcks) deferredWriteAcks.push(acknowledge);
+      else acknowledge();
     },
   };
   plugin = createPlugin(host);
@@ -101,6 +105,21 @@ test('publishes weight and handles tare plus circle-button commands', async ({re
   await request.post(`${baseUrl}/scale/control`, {data: {action: 'tare'}});
   await request.post(`${baseUrl}/scale/control`, {data: {action: 'button'}});
   expect(state.writes.length).toBeGreaterThan(before);
+});
+
+test('locks the checkbox while a settings save is awaiting host acknowledgement', async ({page}) => {
+  await page.goto(`${baseUrl}/settings?ui=1&deviceId=scale-1`);
+  await expect(page.locator('#save')).toBeEnabled();
+  deferWriteAcks = true;
+  await page.locator('#save').click();
+  await expect(page.locator('#usbPower')).toBeDisabled();
+  await expect(page.locator('#save')).toBeDisabled();
+  await expect.poll(() => deferredWriteAcks.length).toBe(1);
+  const acknowledge = deferredWriteAcks.shift();
+  acknowledge();
+  await expect(page.locator('#status')).toHaveText('Saved');
+  await expect(page.locator('#usbPower')).toBeEnabled();
+  deferWriteAcks = false;
 });
 
 test('rejects malformed settings values', async ({request}) => {
