@@ -15,11 +15,12 @@ const b64 = bytes => Buffer.from(bytes).toString("base64");
 function fakeSession(id) {
   const writes = [];
   const publications = [];
+  const samples = [];
   const infos = [];
   let onWeight;
   let disconnected;
   const session = {
-    writes, publications, infos,
+    writes, publications, samples, infos,
     gatt: {
       async discoverServices() {
         return [service, batteryService, infoService];
@@ -39,31 +40,36 @@ function fakeSession(id) {
       },
       onDisconnect(callback) { disconnected = callback; },
     },
-    async publish(value) { publications.push(value); },
+    async publish(value, sample) { publications.push(value); samples.push(sample); },
     async publishInfo(value) { infos.push(value); },
   };
-  session.emitWeight = async () => onWeight(b64([0, 10, 0, 0]), {at: Date.now()});
+  session.emitWeight = async (bytes = [0, 10, 0, 0], sample = {at: Date.now()}) => onWeight(b64(bytes), sample);
   session.disconnect = () => disconnected?.();
   return session;
 }
 
-function harness() {
+function harness({ackReads = true, ackWrites = true} = {}) {
   let driver;
   const store = new Map();
+  const storageCalls = [];
   let plugin;
   const host = {
     devices: {bindDriver(id, value) { assert.equal(id, "skale"); driver = value; }},
     storage(command) {
-      queueMicrotask(() => plugin.onEvent({
-        name: command.type === "read" ? "storageRead" : "storageWrite",
-        payload: {key: command.key, value: store.get(command.key)},
-      }));
+      storageCalls.push(command);
       if (command.type === "write") store.set(command.key, command.data);
+      if ((command.type === "read" && ackReads) ||
+          (command.type === "write" && ackWrites)) {
+        queueMicrotask(() => plugin.onEvent({
+          name: command.type === "read" ? "storageRead" : "storageWrite",
+          payload: {key: command.key, value: store.get(command.key)},
+        }));
+      }
     },
   };
   plugin = createPlugin(host);
   plugin.onLoad();
-  return {plugin, driver};
+  return {plugin, driver, store, storageCalls};
 }
 
 test("registers current settings surface and keeps two bindings independent", async () => {
@@ -87,6 +93,28 @@ test("registers current settings surface and keeps two bindings independent", as
       await aAdapter.tare();
       assert.equal(a.writes.at(-1)[2], b64([0x10]));
       assert.notEqual(a.writes, b.writes);
+      const weightCases = [
+        {bytes: [0, 0, 0, 0], value: 0},
+        {bytes: [0, 0, 0, 1], value: 0x01000000 / 2560},
+        {bytes: [0xff, 0xff, 0xff, 0xff], value: -1 / 2560},
+        {bytes: [0, 0xff, 0xff, 0xff, 0], value: -1},
+        {bytes: [0, 0x2a, 0, 0, 0], value: 42},
+        {bytes: [0, 0xff, 0xff, 0xff, 0, 0, 0, 0, 0], value: -1},
+        {bytes: [0, 0x2a, 0, 0, 0, 0, 0, 0, 0], value: 42},
+        {bytes: [0, 123, 0, 0, 0xff], value: 12.3},
+        {bytes: [0, 123, 0, 0, 1], value: 1230},
+      ];
+      for (const sample of weightCases) {
+        await a.emitWeight(sample.bytes);
+        assert.equal(a.publications.at(-1).weight, sample.value);
+      }
+      const publicationCount = a.publications.length;
+      await a.emitWeight([0, 1]);
+      await a.emitWeight([0, 1, 2, 3, 4, 5]);
+      assert.equal(a.publications.length, publicationCount);
+      const sampleToken = {token: "sample-token"};
+      await a.emitWeight([0, 10, 0, 0], sampleToken);
+      assert.strictEqual(a.samples.at(-1), sampleToken);
     } finally {
       await Promise.all([aAdapter.disconnect(a), bAdapter.disconnect(b)]);
     }
@@ -116,4 +144,62 @@ test("settings endpoint rejects malformed values and applies valid USB declarati
   } finally {
     global.fetch = oldFetch;
   }
+});
+
+test("storage write timeout fails closed and ignores a late uncorrelated acknowledgement", async () => {
+  const {plugin} = harness({ackWrites: false});
+  const initial = await plugin.handleHttpRequest({
+    method: "GET", query: {deviceId: "scale-1"},
+  });
+  assert.equal(initial.status, 200);
+  const first = await plugin.handleHttpRequest({
+    method: "POST", query: {deviceId: "scale-1"}, body: {usbPower: true},
+  });
+  assert.equal(first.status, 502);
+  plugin.onEvent({name: "storageWrite", payload: {value: "late"}});
+  const second = await plugin.handleHttpRequest({
+    method: "POST", query: {deviceId: "scale-2"}, body: {usbPower: false},
+  });
+  assert.equal(second.status, 502);
+  const stale = await plugin.handleHttpRequest({
+    method: "GET", query: {deviceId: "scale-1"},
+  });
+  assert.equal(stale.status, 503);
+  plugin.onUnload();
+});
+
+test("storage read timeout blocks reconnect until plugin reload", async () => {
+  const {plugin} = harness({ackReads: false});
+  const first = await plugin.handleHttpRequest({
+    method: "GET", query: {deviceId: "scale-1"},
+  });
+  assert.equal(first.status, 503);
+  plugin.onEvent({
+    name: "storageRead",
+    payload: {key: "skale.reaplugin.device.scale-1", value: {usbPower: true}},
+  });
+  const second = await plugin.handleHttpRequest({
+    method: "GET", query: {deviceId: "scale-1"},
+  });
+  assert.equal(second.status, 503);
+  plugin.onUnload();
+});
+
+test("unload rejects queued reads without issuing another host request", async () => {
+  const {plugin, storageCalls} = harness({ackReads: false});
+  const pending = plugin.handleHttpRequest({
+    method: "GET", query: {deviceId: "scale-1"},
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  plugin.onUnload();
+  assert.equal((await pending).status, 503);
+  const callsAfterUnload = storageCalls.length;
+  assert.equal((await plugin.handleHttpRequest({
+    method: "GET", query: {deviceId: "scale-1"},
+  })).status, 503);
+  assert.equal(storageCalls.length, callsAfterUnload);
+  plugin.onEvent({
+    name: "storageRead",
+    payload: {key: "skale.reaplugin.device.scale-1", value: {usbPower: true}},
+  });
 });
