@@ -10,6 +10,6 @@
   },
   "license": "GPL-3.0-or-later",
   "devDependencies": {
-    "@playwright/test": "1.64.0"
+    "@playwright/test": "1.64.1"
   }
 }
