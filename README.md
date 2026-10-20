@@ -121,8 +121,10 @@ the current main pin above is the contract used by CI.
 
 ## Limitations
 
-No physical hardware run is included. Host platform trust and plugin transport
-permissions still apply. Self-signed TLS is unrelated to this BLE plugin and
+Automated CI uses synthetic devices. The owner-reported hardware test above
+covers the name-discovery change on one Skale 2.0 with Decaid 0.9.0; other
+hardware and firmware combinations remain unvalidated. Host platform trust and
+plugin transport permissions still apply. Self-signed TLS is unrelated to this BLE plugin and
 must be solved in the host/E64 plugin separately.
 
 ## Releases
