@@ -54,6 +54,25 @@ ignored. Square machine actions remain subject to the held host action review
 (#845/#853). Button command write failures propagate through the host BLE session;
 missing button subscription is tolerated so weight remains usable.
 
+### Switching from Decaid's built-in Skale driver
+
+Enable the plugin before discovering and connecting the scale. If the Skale was
+previously connected using Decaid's built-in driver, disconnect and **Forget**
+that old Skale device, then search and connect again. A Decaid restart was also
+used during the reported migration test. Check `GET /api/v1/devices`: a connected
+plugin-driven scale has an id starting with `plugin:skale.reaplugin:skale:`; a
+plain Bluetooth address indicates the native driver is still in use.
+
+Discovery matches the advertised name prefix `Skale`, case-insensitively.
+The driver validates the required Skale service after connecting, so missing
+service UUIDs in advertising do not prevent discovery.
+
+A Skale 2.0 owner tested this discovery change on Android Decaid 0.9.0. After
+forgetting the old connection and reconnecting, the original v0.2.0 release still
+failed to provide physical circle-button tare, while a v0.2.0-based build with
+this discovery change worked. This is one reported hardware setup, not validation
+of every Skale model, firmware or host platform.
+
 ## Development
 
 ```sh
