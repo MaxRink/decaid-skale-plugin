@@ -355,3 +355,9 @@ test("square button starts and stops shots only for the opted-in primary scale",
     plugin.onUnload();
   }
 });
+
+test("manifest claims Skales by advertised name prefix only", () => {
+  const manifest = require("../manifest.json");
+  assert.deepEqual(manifest.drivers[0].ble, {match: {name: {prefix: "Skale"}}});
+  assert.equal(manifest.version, require("../package.json").version);
+});

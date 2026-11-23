@@ -115,7 +115,7 @@ void main() {
     );
 
     final transports = <_SkaleTransport>[];
-    final evidence = BleAdvertisementEvidence(serviceUuids: const [_service]);
+    final evidence = BleAdvertisementEvidence(name: 'Skale2', serviceUuids: const [_service]);
     Future<Scale> candidate(String id) async => await manager.bleService
           .createCandidate(
             driver: manager.bleService.registry.decide(evidence).drivers.single,
@@ -189,6 +189,35 @@ void main() {
     expect(firstTransport.writes.length, firstAfterDisconnect);
     expect(manager.bleService.registry.activeBindingCount, 1);
     await second.disconnect();
+  });
+
+  test('name matcher owns Skales and releases other devices without service lists', () async {
+    final root = Platform.environment['SKALE_PLUGIN_ROOT'] ?? '.';
+    final manifest = PluginManifest.fromJson(
+      jsonDecode(File('$root/manifest.json').readAsStringSync())
+          as Map<String, dynamic>,
+    );
+    final manager = PluginManager(kvStore: FakeKeyValueStoreService());
+    addTearDown(manager.dispose);
+    await manager.loadPlugin(
+      id: manifest.id,
+      manifest: manifest,
+      settings: const {},
+      jsCode: File('$root/plugin.js').readAsStringSync(),
+    );
+    PluginBleOwnership decide(String? name, {bool nameComplete = true}) =>
+        manager.bleService.registry
+            .decide(BleAdvertisementEvidence(
+              name: name,
+              nameComplete: nameComplete,
+              servicesComplete: false,
+            ))
+            .kind;
+    expect(decide('Skale2'), PluginBleOwnership.plugin);
+    expect(decide('Skale'), PluginBleOwnership.plugin);
+    expect(decide('DE1'), PluginBleOwnership.native);
+    expect(decide(null), PluginBleOwnership.native);
+    expect(decide(null, nameComplete: false), PluginBleOwnership.pending);
   });
 
   test('settings surface uses host storage and survives plugin reload', () async {
@@ -325,7 +354,7 @@ void main() {
       settings: const {},
       jsCode: File('$root/plugin.js').readAsStringSync(),
     );
-    final evidence = BleAdvertisementEvidence(serviceUuids: const [_service]);
+    final evidence = BleAdvertisementEvidence(name: 'Skale2', serviceUuids: const [_service]);
     late _SkaleTransport transport;
     final scale = await manager.bleService.createCandidate(
       driver: manager.bleService.registry.decide(evidence).drivers.single,
@@ -407,7 +436,7 @@ void main() {
       settings: const {},
       jsCode: File('$root/plugin.js').readAsStringSync(),
     );
-    final evidence = BleAdvertisementEvidence(serviceUuids: const [_service]);
+    final evidence = BleAdvertisementEvidence(name: 'Skale2', serviceUuids: const [_service]);
     late _SkaleTransport transport;
     final scale = await manager.bleService.createCandidate(
       driver: manager.bleService.registry.decide(evidence).drivers.single,

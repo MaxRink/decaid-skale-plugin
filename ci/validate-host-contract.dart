@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:reaprime/src/plugins/plugin_ble_matcher.dart';
 import 'package:reaprime/src/plugins/plugin_package.dart';
 
 /// Runs from a pinned Decaid checkout so the real host parser validates this
@@ -28,6 +29,26 @@ void main(List<String> args) {
       surfaces.single['role'] != 'settings' ||
       surfaces.single['endpoint'] != 'device-settings') {
     throw StateError('Skale manifest is incompatible with the pinned Decaid host');
+  }
+  final matcher = package.manifest.drivers.single.ble!;
+  final cases = <(String?, bool, PluginBleMatch)>[
+    ('Skale2', true, PluginBleMatch.match),
+    ('Skale', true, PluginBleMatch.match),
+    ('SKALE2', false, PluginBleMatch.match),
+    ('DE1', true, PluginBleMatch.noMatch),
+    (null, true, PluginBleMatch.noMatch),
+    (null, false, PluginBleMatch.indeterminate),
+  ];
+  for (final (name, nameComplete, expected) in cases) {
+    final result = matcher.evaluate(
+      name: name,
+      nameComplete: nameComplete,
+      serviceUuids: null,
+      servicesComplete: false,
+    );
+    if (result != expected) {
+      throw StateError('BLE matcher for $name/$nameComplete is $result, expected $expected');
+    }
   }
   stdout.writeln('validated ${package.manifest.id} ${package.manifest.version}');
 }

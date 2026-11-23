@@ -37,7 +37,8 @@ device-management authority.
 
 The plugin supports the current host contract:
 
-- host-owned BLE with up to four independently fenced bindings;
+- host-owned BLE with up to four independently fenced bindings, claimed by a
+  case-insensitive advertised-name `prefix: "Skale"` matcher;
 - one primary brewing scale and runtime-only auxiliary scales, with no driver
   role assignment or persisted dosing role;
 - 4-byte fixed point and 5/9-byte signed mantissa/exponent weight frames;
@@ -45,6 +46,17 @@ The plugin supports the current host contract:
 - tare, timer and display commands;
 - a validated `role: "settings"` surface backed by the namespaced
   `pluginStorage` KV store.
+
+The BLE matcher is name-only. Skale and DE1 advertisements often omit a complete
+service list, and Decaid combines name and service predicates with AND, so a
+`serviceUuids` predicate left every unproven device, the DE1 included,
+indeterminate. That kept ownership pending at the scan deadline, so the native
+Skale2 driver kept the scale and native DE1 reconnects could be blocked. A
+present advertised name now decides ownership: `Skale`/`Skale2` match, any other
+name (for example `DE1`) is a definite non-match and stays native. A device that
+advertises no name stays indeterminate until a name is observed. A device whose
+name starts with `Skale` but lacks the Skale service fails `connect` with
+"Skale service unavailable".
 
 USB power is a manual, default-off declaration. It suppresses battery reads and
 publishes `batteryLevel: null`; it is not sensed power. The Skale circle button
