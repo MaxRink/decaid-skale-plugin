@@ -53,15 +53,14 @@ The plugin supports the current host contract:
 - a validated `role: "settings"` surface backed by the namespaced
   `pluginStorage` KV store.
 
-The BLE matcher is name-only. Skale and DE1 advertisements often omit a complete
-service list, and Decaid combines name and service predicates with AND, so a
-`serviceUuids` predicate left every unproven device, the DE1 included,
-indeterminate. That kept ownership pending at the scan deadline, so the native
-Skale2 driver kept the scale and native DE1 reconnects could be blocked. A
-present advertised name now decides ownership: `Skale`/`Skale2` match, any other
-name (for example `DE1`) is a definite non-match and stays native. A device that
-advertises no name stays indeterminate until a name is observed. A device whose
-name starts with `Skale` but lacks the Skale service fails `connect` with
+The BLE matcher uses the advertised name only. Names beginning with `Skale`
+match case-insensitively, even when advertised service UUIDs are unavailable.
+Other names, such as `DE1` or `Decent Scale`, do not match. If the host reports
+the name evidence as complete but no name is present, the plugin does not claim
+the device, even if it advertises the Skale service UUID (`ff08`); ownership
+remains with Decaid's native discovery path. If name evidence is incomplete and
+no name is available yet, ownership remains pending. A matching name still
+requires the Skale service after connection; otherwise connection fails with
 "Skale service unavailable".
 
 USB power is a manual, default-off declaration. It suppresses battery reads and
@@ -128,6 +127,16 @@ The setting is stored with the USB power setting in the plugin's namespaced
 currently omits plugin storage namespaces (its `store.json` section lists only
 the REST key-value store), so this setting, like USB power, is not carried by a
 Decaid backup. Re-enable it after restoring onto a new device.
+
+### Switching from Decaid's built-in Skale driver
+
+After installing and enabling the plugin:
+
+1. Disconnect the remembered Skale device and choose **Forget** in Decaid.
+2. Restart Decaid, then search for and connect to the scale again.
+3. Check that its device ID starts with `plugin:skale.reaplugin:skale:`.
+
+Enabling the plugin alone does not replace a remembered native connection.
 
 ## Settings page
 
@@ -230,8 +239,11 @@ the current main pin above is the contract used by CI.
 
 ## Limitations
 
-No physical hardware run is included. Host platform trust and plugin transport
-permissions still apply.
+Name-based discovery and circle-button tare were confirmed on one Skale 2.0
+with Android Decaid 0.9.0; other models, firmware and host platforms are
+unvalidated. This does not establish hardware validation of every feature or
+the current release. Host platform trust and plugin transport permissions still
+apply.
 
 Decaid's background scale watch cannot yet reconnect a plugin scale. When the
 watch sights the remembered Skale it stops its scan, which starts a new BLE
@@ -240,8 +252,9 @@ admission check then finds no evidence and the host fails the connect with
 `stale_session: BLE ownership changed` before this plugin's `connect` runs. The
 app log shows "Preferred scale plugin:skale.reaplugin:… sighted" followed within
 about 10 ms by "Scale failed to connect (onConnect threw)". The scale connects on
-the next full scan instead. The fix belongs in Decaid's BLE discovery service. Self-signed TLS is unrelated to this BLE plugin and
-must be solved in the host/E64 plugin separately.
+the next full scan instead. The fix belongs in Decaid's BLE discovery service.
+Self-signed TLS is unrelated to this BLE plugin and must be solved in the
+host/E64 plugin separately.
 
 ## Releases
 
