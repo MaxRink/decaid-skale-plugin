@@ -19,6 +19,13 @@ function createPlugin(host) {
   // Host storage is asynchronous (Hive/open-box and put); keep the deadline
   // bounded without treating a normal slow disk as an unrecoverable fault.
   const storageAckTimeout = 5000;
+  const hostApi = "http://localhost:8080/api/v1";
+  const squareDebounce = 1000;
+  const machineControlHint =
+    "Allow machine control for the Skale plugin in Decaid Settings > Plugins";
+  let squareInFlight = false;
+  let lastSquarePress = -Infinity;
+  let machineControlMessage = null;
   let storageWriteQueue = Promise.resolve();
   let storageWriteFailure = null;
   let unloaded = false;
@@ -57,6 +64,10 @@ function createPlugin(host) {
   <input id="deviceId" type="hidden">
   <p>Device: <span id="deviceLabel"></span></p>
   <label><input id="usbPower" type="checkbox"> USB powered (suppress battery reads)</label>
+  <label><input id="squareButtonShot" type="checkbox"> Square button starts/stops a shot</label>
+  <p>Starts espresso only when this is the primary scale, the machine is idle and no
+  group head controller is present; stops a running shot. Never wakes the machine.</p>
+  <p id="machineControl" hidden></p>
   <button id="save" disabled>Save</button>
   <output id="status" role="status"></output>
 </form>
@@ -65,8 +76,10 @@ const form = document.getElementById("settings");
 const deviceId = document.getElementById("deviceId");
 const deviceLabel = document.getElementById("deviceLabel");
 const usbPower = document.getElementById("usbPower");
+const squareButtonShot = document.getElementById("squareButtonShot");
 const save = document.getElementById("save");
 const status = document.getElementById("status");
+const inputs = [save, usbPower, squareButtonShot];
 let loadGeneration = 0;
 let loaded = false;
 deviceId.value = new URLSearchParams(location.search).get("deviceId") || "";
@@ -76,8 +89,7 @@ async function load() {
   const id = deviceId.value;
   const generation = ++loadGeneration;
   loaded = false;
-  save.disabled = true;
-  usbPower.disabled = true;
+  for (const input of inputs) input.disabled = true;
   if (!id) {
     status.textContent = "Device unavailable";
     return;
@@ -89,10 +101,10 @@ async function load() {
     const value = await response.json();
     if (generation !== loadGeneration) return;
     usbPower.checked = value.usbPower === true;
+    squareButtonShot.checked = value.squareButtonShot === true;
     loaded = true;
-    save.disabled = false;
-    usbPower.disabled = false;
-    status.textContent = "";
+    for (const input of inputs) input.disabled = false;
+    status.textContent = value.machineControlMessage || "";
   } catch (error) {
     if (generation === loadGeneration) status.textContent = error.message;
   }
@@ -102,24 +114,35 @@ form.addEventListener("submit", async event => {
   event.preventDefault();
   if (!loaded) return;
   status.textContent = "";
-  save.disabled = true;
-  usbPower.disabled = true;
+  for (const input of inputs) input.disabled = true;
   try {
     const response = await fetch("device-settings?deviceId=" + encodeURIComponent(deviceId.value), {
       method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({usbPower: usbPower.checked}),
+      body: JSON.stringify({usbPower: usbPower.checked, squareButtonShot: squareButtonShot.checked}),
     });
     if (!response.ok) throw new Error("Settings could not be saved");
     status.textContent = "Saved";
   } catch (error) {
     status.textContent = error.message;
   } finally {
-    save.disabled = !loaded;
-    usbPower.disabled = !loaded;
+    for (const input of inputs) input.disabled = !loaded;
   }
 });
+async function showMachineControl() {
+  const indicator = document.getElementById("machineControl");
+  try {
+    const response = await fetch("/api/v1/plugins");
+    const plugin = response.ok ? (await response.json()).find(entry => entry.id === "skale.reaplugin") : null;
+    if (!plugin || typeof plugin.machineControl !== "boolean") return;
+    indicator.textContent = plugin.machineControl
+      ? "Decaid allows the Skale plugin to control the machine."
+      : "${machineControlHint}.";
+    indicator.hidden = false;
+  } catch (_) {}
+}
 deviceId.addEventListener("change", load);
 load();
+showMachineControl();
 </script>`;
 
   function requestDeviceId(request) {
@@ -177,15 +200,19 @@ load();
           }
         });
         if (stored == null) {
-          const value = {usbPower: false};
+          const value = {usbPower: false, squareButtonShot: false};
           deviceSettings.set(deviceId, value);
           return {value, known: true};
         }
-        if (typeof stored.usbPower !== "boolean") {
+        const squareButtonShot = stored.squareButtonShot === undefined
+          ? false
+          : stored.squareButtonShot;
+        if (typeof stored.usbPower !== "boolean" || typeof squareButtonShot !== "boolean") {
           return {value: null, known: false};
         }
         const value = {
           usbPower: stored.usbPower,
+          squareButtonShot,
         };
         deviceSettings.set(deviceId, value);
         return {value, known: true};
@@ -294,6 +321,51 @@ load();
       if (code < 0x20 || code === 0x7f) return null;
     }
     return value;
+  }
+
+  async function getJson(path) {
+    const response = await fetch(hostApi + path);
+    return response.ok ? response.json() : null;
+  }
+
+  async function requestMachineState(next) {
+    const response = await fetch(hostApi + "/machine/state/" + next, {method: "PUT"});
+    if (response.ok) {
+      machineControlMessage = null;
+    } else if (response.status === 403) {
+      const body = await response.json().catch(() => null);
+      if (body && body.code === "machine_control_not_granted") {
+        machineControlMessage = machineControlHint;
+      }
+    }
+  }
+
+  async function squarePressed(deviceId, isCurrent) {
+    const now = Date.now();
+    const settings = deviceSettings.get(deviceId);
+    if (!settings || settings.squareButtonShot !== true) return;
+    if (squareInFlight || now - lastSquarePress < squareDebounce) return;
+    lastSquarePress = now;
+    squareInFlight = true;
+    try {
+      const devices = await getJson("/devices");
+      const primary = Array.isArray(devices) && devices.some(entry =>
+        entry && entry.id === deviceId && entry.connectionRole === "primary");
+      if (!primary || !isCurrent()) return;
+      const snapshot = await getJson("/machine/state");
+      const machineState = snapshot && snapshot.state && snapshot.state.state;
+      if (!isCurrent()) return;
+      if (machineState === "espresso") {
+        await requestMachineState("idle");
+      } else if (machineState === "idle") {
+        const info = await getJson("/machine/info");
+        if (info && info.GHC === false && isCurrent()) await requestMachineState("espresso");
+      }
+    } catch (_) {
+      // Machine reads are best effort; a failed press does nothing.
+    } finally {
+      squareInFlight = false;
+    }
   }
 
   function delay() {
@@ -509,7 +581,12 @@ load();
                 try {
                   await session.gatt.subscribe(service, buttonCharacteristic, async data => {
                     const button = decodeBase64(data);
-                    if (!isActive(state) || !button || button.length !== 1 || button[0] !== 0x01) return;
+                    if (!isActive(state) || !button || button.length !== 1) return;
+                    if (button[0] === 0x02) {
+                      squarePressed(deviceId, () => isActive(state) && !unloaded);
+                      return;
+                    }
+                    if (button[0] !== 0x01) return;
                     try {
                       await command([0x10]);
                     } catch (error) {
@@ -573,18 +650,30 @@ load();
       if (!deviceId) return jsonResponse(400, {error: "deviceId is required"});
       if (request.method === "GET") {
         return loadSettings(deviceId).then(setting => setting.known
-          ? jsonResponse(200, {deviceId, ...setting.value})
+          ? jsonResponse(200, {
+            deviceId,
+            ...setting.value,
+            ...(machineControlMessage ? {machineControlMessage} : {}),
+          })
           : jsonResponse(503, {error: "settings unavailable"}));
       }
-      if (request.method !== "POST" || !request.body ||
-          typeof request.body.usbPower !== "boolean" ||
-          Object.keys(request.body).some(key => key !== "usbPower")) {
-        return jsonResponse(400, {error: "usbPower must be a boolean"});
+      const body = request.body;
+      if (request.method !== "POST" || !body ||
+          typeof body.usbPower !== "boolean" ||
+          !["boolean", "undefined"].includes(typeof body.squareButtonShot) ||
+          Object.keys(body).some(key => key !== "usbPower" && key !== "squareButtonShot")) {
+        return jsonResponse(400, {
+          error: "usbPower must be a boolean; squareButtonShot is an optional boolean",
+        });
       }
-      const settings = {
-        usbPower: request.body.usbPower,
-      };
-      return saveSettings(deviceId, settings).then(async () => {
+      const squareButtonShot = typeof body.squareButtonShot === "boolean"
+        ? Promise.resolve(body.squareButtonShot)
+        : loadSettings(deviceId).then(setting => setting.known && setting.value.squareButtonShot);
+      let settings;
+      return squareButtonShot.then(square => {
+        settings = {usbPower: body.usbPower, squareButtonShot: square};
+        return saveSettings(deviceId, settings);
+      }).then(async () => {
         const update = instanceControls.get(deviceId);
         if (update) await update(settings);
         return jsonResponse(200, {
@@ -595,6 +684,7 @@ load();
     },
     onUnload() {
       unloaded = true;
+      machineControlMessage = null;
       instanceControls.clear();
       deviceSettings.clear();
       settingsOperations.clear();

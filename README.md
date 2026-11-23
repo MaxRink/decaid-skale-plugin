@@ -49,10 +49,45 @@ The plugin supports the current host contract:
 USB power is a manual, default-off declaration. It suppresses battery reads and
 publishes `batteryLevel: null`; it is not sensed power. The Skale circle button
 notification (`ef82`, payload `0x01`) performs a local scale tare and is fenced to
-that BLE session. Square (`0x02`) and unknown or malformed button payloads are
-ignored. Square machine actions remain subject to the held host action review
-(#845/#853). Button command write failures propagate through the host BLE session;
-missing button subscription is tolerated so weight remains usable.
+that BLE session. Unknown or malformed button payloads are ignored. Button command
+write failures propagate through the host BLE session; missing button subscription
+is tolerated so weight remains usable.
+
+### Square button shot start/stop
+
+The per-device setting **Square button starts/stops a shot** is off by default.
+When it is on, a square press (`0x02`) follows the
+`BLE notification -> Skale plugin -> Decaid HTTP API -> machine action` path of
+decentespresso/decaid#715, with no Skale-specific code in Decaid:
+
+1. `GET /api/v1/devices` must list this binding with `connectionRole: "primary"`.
+   Auxiliary bindings never act.
+2. `GET /api/v1/machine/state` is read at press time. `espresso` sends
+   `PUT /api/v1/machine/state/idle` (stop).
+3. `idle` sends `PUT /api/v1/machine/state/espresso` only when
+   `GET /api/v1/machine/info` reports `GHC: false`. GHC `true` or unknown does
+   nothing, because a group head controller starts shots on the machine itself.
+4. Every other state, including `sleeping`, does nothing. The plugin never wakes
+   the machine.
+
+Presses within one second of the last accepted press, or while a previous press
+is still talking to Decaid, are ignored. A press from a retired session, or a
+session retired while its requests are in flight, does nothing.
+
+Decaid builds with plugin machine-control hardening answer the `PUT` with `403`
+and `code: "machine_control_not_granted"` until the user allows it. The plugin
+does not retry; the settings page shows "Allow machine control for the Skale
+plugin in Decaid Settings > Plugins" until a later press succeeds. When the host
+reports a per-plugin `machineControl` grant in `GET /api/v1/plugins`, the
+settings page shows its state. Stock Decaid accepts the `PUT` without a grant.
+No new manifest permission is required: the plugin uses its existing `api`
+permission.
+
+The setting is stored with the USB power setting in the plugin's namespaced
+`pluginStorage` and survives plugin reload. Decaid's `/api/v1/data/export`
+currently omits plugin storage namespaces (its `store.json` section lists only
+the REST key-value store), so this setting, like USB power, is not carried by a
+Decaid backup. Re-enable it after restoring onto a new device.
 
 ## Development
 
@@ -70,8 +105,9 @@ npx playwright install --with-deps chromium
 npm run test:browser
 ```
 
-The browser suite covers the settings page, persisted USB-power reload,
-malformed settings rejection, weight publication, tare, and circle-button tare.
+The browser suite covers the settings page, persisted USB-power and square-button
+reload, the machine-control hint and grant indicator, malformed settings
+rejection, weight publication, tare, and circle-button tare.
 CI runs it on Node 24 alongside the native Node matrix.
 
 GitHub Actions runs the protocol/session suite and package-root checks on Node
@@ -80,7 +116,10 @@ real package resolver and manifest parser against both a GitHub-style source
 archive and the generated local ZIP, then runs `ci/host_runtime_test.dart` inside
 the pinned host QuickJS runtime with fake GATT transports. It covers multi-binding
 isolation, settings/pluginStorage persistence, nullable metadata, commands, circle
-tare, ignored square/unknown buttons, write failures, and late-event fencing.
+tare, ignored unknown buttons, the square-button host API path (default off,
+auxiliary ignored, `machine_control_not_granted` hint), write failures, and
+late-event fencing. The square-button case binds a fake host API on
+`localhost:8080` for the duration of the test.
 The host is pinned to revision `bafa9b3f2b90e65334e990b0b9601a9965cf979b`.
 
 The package is a ZIP containing only the manifest, plugin source, README and

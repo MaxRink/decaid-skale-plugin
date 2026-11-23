@@ -210,7 +210,7 @@ void main() {
       'query': {'deviceId': 'AA:01'},
     });
     expect(initial['status'], 200);
-    expect(jsonDecode(initial['body'] as String), {'deviceId': 'AA:01', 'usbPower': false});
+    expect(jsonDecode(initial['body'] as String), {'deviceId': 'AA:01', 'usbPower': false, 'squareButtonShot': false});
     final invalid = await _request(manager, manifest.id, 'settings-post-invalid', {
       'method': 'POST',
       'query': {'deviceId': 'AA:01'},
@@ -223,7 +223,7 @@ void main() {
       'body': {'usbPower': true},
     });
     expect(saved['status'], 200);
-    expect(jsonDecode(saved['body'] as String), {'deviceId': 'AA:01', 'usbPower': true});
+    expect(jsonDecode(saved['body'] as String), {'deviceId': 'AA:01', 'usbPower': true, 'squareButtonShot': false});
     final ui = await _request(manager, manifest.id, 'settings-ui', {
       'method': 'GET',
       'query': {'ui': '1'},
@@ -245,7 +245,7 @@ void main() {
       'query': {'deviceId': 'AA:01'},
     });
     expect(persisted['status'], 200);
-    expect(jsonDecode(persisted['body'] as String), {'deviceId': 'AA:01', 'usbPower': true});
+    expect(jsonDecode(persisted['body'] as String), {'deviceId': 'AA:01', 'usbPower': true, 'squareButtonShot': false});
   });
 
   test('serializes storage writes across devices before acknowledging each request', () async {
@@ -284,6 +284,110 @@ void main() {
     expect(secondDone, isFalse);
     expect((await first)['status'], 200);
     expect((await second)['status'], 200);
+  });
+
+  test('square button reads the host API and reports an ungranted machine write', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 8080);
+    addTearDown(() => server.close(force: true));
+    final requests = <String>[];
+    var role = 'auxiliary';
+    late String deviceId;
+    server.listen((request) async {
+      if (request.uri.path.startsWith('/api/v1/')) {
+        requests.add('${request.method} ${request.uri.path}');
+      }
+      final body = switch (request.uri.path) {
+        '/api/v1/devices' => [{'id': deviceId, 'connectionRole': role}],
+        '/api/v1/machine/state' => {'state': {'state': 'idle', 'substate': 'idle'}},
+        '/api/v1/machine/info' => {'GHC': false},
+        _ => {
+          'error': 'Plugin skale.reaplugin is not allowed to control the machine',
+          'code': 'machine_control_not_granted',
+        },
+      };
+      request.response.statusCode = request.method == 'PUT' ? HttpStatus.forbidden : HttpStatus.ok;
+      request.response.write(jsonEncode(body));
+      await request.response.close();
+    });
+    final root = Platform.environment['SKALE_PLUGIN_ROOT'] ?? '.';
+    final manifest = PluginManifest.fromJson(
+      jsonDecode(File('$root/manifest.json').readAsStringSync())
+          as Map<String, dynamic>,
+    );
+    final manager = PluginManager(
+      kvStore: FakeKeyValueStoreService(),
+      bleRegistry: PluginBleRegistry(activeBindingLimit: 4),
+    );
+    addTearDown(manager.dispose);
+    await manager.loadPlugin(
+      id: manifest.id,
+      manifest: manifest,
+      settings: const {},
+      jsCode: File('$root/plugin.js').readAsStringSync(),
+    );
+    final evidence = BleAdvertisementEvidence(serviceUuids: const [_service]);
+    late _SkaleTransport transport;
+    final scale = await manager.bleService.createCandidate(
+      driver: manager.bleService.registry.decide(evidence).drivers.single,
+      physicalId: 'DD:04',
+      evidence: evidence,
+      admit: () => true,
+      createTransport: () {
+        transport = _SkaleTransport('DD:04');
+        transport.queueRead(_battery, Uint8List.fromList(const [87]));
+        transport.queueRead(_firmware, Uint8List.fromList(utf8.encode('R-DD')));
+        return transport;
+      },
+    ) as Scale;
+    deviceId = scale.deviceId;
+    final connect = scale.onConnect();
+    (scale as ScaleSnapshotHandoff).activateSnapshots();
+    final weightPump = Timer.periodic(const Duration(milliseconds: 100), (_) {
+      transport.emitWeight();
+    });
+    try {
+      await connect;
+    } finally {
+      weightPump.cancel();
+    }
+    Future<void> press() async {
+      transport.emitButton(2);
+      await Future<void>.delayed(const Duration(milliseconds: 1200));
+    }
+
+    await press();
+    expect(requests, isEmpty);
+    final enabled = await _request(manager, manifest.id, 'square-on', {
+      'method': 'POST',
+      'query': {'deviceId': deviceId},
+      'body': {'usbPower': false, 'squareButtonShot': true},
+    });
+    expect(enabled['status'], 200);
+    await press();
+    expect(requests, ['GET /api/v1/devices']);
+    requests.clear();
+    role = 'primary';
+    final writesBefore = transport.writes.length;
+    await press();
+    expect(requests.take(3), [
+      'GET /api/v1/devices',
+      'GET /api/v1/machine/state',
+      'GET /api/v1/machine/info',
+    ]);
+    expect(requests.skip(3), anyOf(isEmpty, ['PUT /api/v1/machine/state/espresso']));
+    expect(transport.writes.length, writesBefore);
+    final settings = await _request(manager, manifest.id, 'square-status', {
+      'method': 'GET',
+      'query': {'deviceId': deviceId},
+    });
+    expect(
+      jsonDecode(settings['body'] as String)['machineControlMessage'],
+      'Allow machine control for the Skale plugin in Decaid Settings > Plugins',
+    );
+    await scale.disconnect();
+    requests.clear();
+    await press();
+    expect(requests, isEmpty);
   });
 
   test('invalid battery and firmware reads publish nullable metadata', () async {

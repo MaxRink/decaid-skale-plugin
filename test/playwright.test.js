@@ -20,6 +20,7 @@ const store = new Map();
 let deferWriteAcks = false;
 const deferredWriteAcks = [];
 const state = {weight: null, infos: [], writes: []};
+let pluginsList = null;
 
 function response(res, status, body, headers = {'content-type': 'application/json'}) {
   res.writeHead(status, headers);
@@ -60,6 +61,7 @@ test.beforeAll(async () => {
     let body = ''; for await (const chunk of req) body += chunk;
     const query = Object.fromEntries(url.searchParams);
     if (url.pathname === '/scale/state') return response(res, 200, state);
+    if (url.pathname === '/api/v1/plugins') return pluginsList ? response(res, 200, pluginsList) : response(res, 404, {error: 'not found'});
     if (url.pathname === '/scale/control') {
       const value = body ? JSON.parse(body) : {};
       if (value.action === 'weight') await weightCallback(b64([0, 25, 0, 0]), {at: Date.now()});
@@ -90,12 +92,15 @@ test('renders settings, reloads persisted USB power, and saves it', async ({page
   await expect(page).toHaveTitle('Skale settings');
   await expect(page.locator('#deviceLabel')).toHaveText('Scale One');
   await expect(page.locator('#save')).toBeEnabled();
+  await expect(page.locator('#squareButtonShot')).not.toBeChecked();
   await page.locator('#usbPower').check();
+  await page.locator('#squareButtonShot').check();
   await page.locator('#save').click();
   await expect(page.locator('#status')).toHaveText('Saved');
-  await expect((await request.get(`${baseUrl}/settings?deviceId=scale-1`)).json()).resolves.toMatchObject({usbPower: true});
+  await expect((await request.get(`${baseUrl}/settings?deviceId=scale-1`)).json()).resolves.toMatchObject({usbPower: true, squareButtonShot: true});
   await page.reload();
   await expect(page.locator('#usbPower')).toBeChecked();
+  await expect(page.locator('#squareButtonShot')).toBeChecked();
 });
 
 test('publishes weight and handles tare plus circle-button commands', async ({request}) => {
@@ -113,6 +118,7 @@ test('locks the checkbox while a settings save is awaiting host acknowledgement'
   deferWriteAcks = true;
   await page.locator('#save').click();
   await expect(page.locator('#usbPower')).toBeDisabled();
+  await expect(page.locator('#squareButtonShot')).toBeDisabled();
   await expect(page.locator('#save')).toBeDisabled();
   await expect.poll(() => deferredWriteAcks.length).toBe(1);
   const acknowledge = deferredWriteAcks.shift();
@@ -120,6 +126,41 @@ test('locks the checkbox while a settings save is awaiting host acknowledgement'
   await expect(page.locator('#status')).toHaveText('Saved');
   await expect(page.locator('#usbPower')).toBeEnabled();
   deferWriteAcks = false;
+});
+
+test('shows the machine-control grant message after a denied square press', async ({page}) => {
+  const oldFetch = global.fetch;
+  global.fetch = async (url, options = {}) => {
+    const reply = (status, body) => ({status, ok: status < 300, async json() { return body; }});
+    if (url.endsWith('/devices')) return reply(200, [{id: 'scale-1', connectionRole: 'primary'}]);
+    if (url.endsWith('/machine/state')) return reply(200, {state: {state: 'idle'}});
+    if (url.endsWith('/machine/info')) return reply(200, {GHC: false});
+    return options.method === 'PUT'
+      ? reply(403, {error: 'Plugin skale.reaplugin is not allowed to control the machine', code: 'machine_control_not_granted'})
+      : reply(404, null);
+  };
+  try {
+    await plugin.handleHttpRequest({method: 'POST', query: {deviceId: 'scale-1'}, body: {usbPower: true, squareButtonShot: true}});
+    await buttonCallback(b64([2]));
+    await new Promise(resolve => setImmediate(resolve));
+  } finally {
+    global.fetch = oldFetch;
+  }
+  await page.goto(`${baseUrl}/settings?ui=1&deviceId=scale-1`);
+  await expect(page.locator('#status')).toHaveText('Allow machine control for the Skale plugin in Decaid Settings > Plugins');
+});
+
+test('shows the host machine-control grant only when the host reports it', async ({page}) => {
+  await page.goto(`${baseUrl}/settings?ui=1&deviceId=scale-1`);
+  await expect(page.locator('#save')).toBeEnabled();
+  await expect(page.locator('#machineControl')).toBeHidden();
+  for (const [granted, text] of [[false, 'Allow machine control for the Skale plugin in Decaid Settings > Plugins.'],
+    [true, 'Decaid allows the Skale plugin to control the machine.']]) {
+    pluginsList = [{id: 'other.reaplugin', machineControl: !granted}, {id: 'skale.reaplugin', machineControl: granted}];
+    await page.reload();
+    await expect(page.locator('#machineControl')).toHaveText(text);
+  }
+  pluginsList = null;
 });
 
 test('rejects malformed settings values', async ({request}) => {
