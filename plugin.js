@@ -28,8 +28,15 @@ function createPlugin(host) {
   const squareDebounce = 1000;
   const machineControlHint =
     "Allow machine control for the Skale plugin in Decaid Settings > Plugins";
+  const ghcNoticeId = "group-head-controller";
+  const ghcNoticeInterval = 10 * 60 * 1000;
+  const ghcNoticeMessage =
+    "Your DE1 has a group head controller, so the Skale square button cannot start " +
+    "espresso. Start the shot on the group head; the square button can stop it.";
   let squareInFlight = false;
   let lastSquarePress = -Infinity;
+  let lastGhcNotice = -Infinity;
+  let ghcNoticeRequest = null;
   let machineControlMessage = null;
   let storageWriteQueue = Promise.resolve();
   let storageWriteFailure = null;
@@ -37,6 +44,32 @@ function createPlugin(host) {
 
   function settingKey(deviceId) {
     return "skale.reaplugin.device." + deviceId;
+  }
+
+  function log(message) {
+    try { host.log("[skale] " + message); } catch (_) {}
+  }
+
+  function errorMessage(error) {
+    return error && error.message ? error.message : String(error);
+  }
+
+  // Hosts without openPluginSurface reject the action as "validation";
+  // onEvent then republishes the notice without it.
+  function notifyGhc(deviceId) {
+    const notice = {id: ghcNoticeId, message: ghcNoticeMessage};
+    if (deviceId) {
+      notice.action = {
+        id: "settings", label: "Settings", type: "openPluginSurface",
+        surfaceId: "settings", deviceId,
+      };
+    }
+    try {
+      const request = host.notify(notice);
+      ghcNoticeRequest = deviceId ? request : null;
+    } catch (error) {
+      log("group head controller notice failed: " + errorMessage(error));
+    }
   }
 
   function jsonResponse(status, body) {
@@ -83,10 +116,10 @@ function createPlugin(host) {
         reading the battery.</p>
       </div>
       <div class="pu-row">
-        <label for="squareButtonShot">Square button starts and stops a shot</label>
+        <label for="squareButtonShot" id="squareLabel">Square button starts and stops a shot</label>
         <input id="squareButtonShot" class="pu-switch" type="checkbox" role="switch">
-        <p class="pu-hint">Starts espresso only when this is the primary scale, the machine is
-        idle and no group head controller is present; stops a running shot. Never wakes the
+        <p class="pu-hint" id="squareHint">When this Skale is the primary scale, the square button
+        stops a running shot and starts espresso while the machine is idle. It never wakes the
         machine.</p>
       </div>
     </div>
@@ -177,7 +210,7 @@ function showMachineControl(granted) {
   machineControl.className = "pu-alert " + (granted ? "pu-ok" : "pu-warn");
   machineControlText.textContent = granted
     ? "Decaid allows the Skale plugin to control the machine."
-    : "To start shots from the scale, Decaid must allow this plugin to control the machine.";
+    : "To start or stop shots from the scale, Decaid must allow this plugin to control the machine.";
   grantStart.hidden = granted;
   grantConfirm.hidden = true;
 }
@@ -208,8 +241,24 @@ document.getElementById("grantConfirmButton").addEventListener("click", async ev
     event.target.disabled = false;
   }
 });
+const squareLabel = document.getElementById("squareLabel");
+const squareHint = document.getElementById("squareHint");
+async function loadMachineInfo() {
+  let info = null;
+  try { info = await pu.api("/api/v1/machine/info"); } catch (_) {}
+  if (info && info.GHC === true) {
+    squareLabel.textContent = "Square button stops a shot";
+    squareHint.textContent = "Your DE1 has a group head controller, so start espresso on the " +
+      "group head. When this Skale is the primary scale, the square button stops a running " +
+      "shot. It never wakes the machine.";
+  } else if (!info || typeof info.GHC !== "boolean") {
+    squareHint.textContent += " Decaid is not connected to the machine right now. On a DE1 " +
+      "with a group head controller the button can only stop a shot; start it on the group head.";
+  }
+}
 load();
 loadMachineControl();
+loadMachineInfo();
 </script>
 </body>
 </html>`;
@@ -278,6 +327,7 @@ loadMachineControl();
           ? false
           : stored.squareButtonShot;
         if (typeof stored.usbPower !== "boolean" || typeof squareButtonShot !== "boolean") {
+          log("settings unavailable for " + deviceId + ": stored value is malformed");
           return {value: null, known: false};
         }
         const value = {
@@ -286,7 +336,8 @@ loadMachineControl();
         };
         deviceSettings.set(deviceId, value);
         return {value, known: true};
-      } catch (_) {
+      } catch (error) {
+        log("settings unavailable for " + deviceId + ": " + errorMessage(error));
         return {value: null, known: false};
       }
     });
@@ -403,18 +454,25 @@ loadMachineControl();
     const response = await fetch(hostApi + "/machine/state/" + next, {method: "PUT"});
     if (response.ok) {
       machineControlMessage = null;
-    } else if (response.status === 403) {
-      const body = await response.json().catch(() => null);
-      if (body && body.code === "machine_control_not_granted") {
-        machineControlMessage = machineControlHint;
-      }
+      return;
+    }
+    const body = await response.json().catch(() => null);
+    if (response.status === 403 && body && body.code === "machine_control_not_granted") {
+      machineControlMessage = machineControlHint;
+      log("square: machine control not granted (403)");
+    } else {
+      log("square: PUT machine/state/" + next + " failed: HTTP " + response.status +
+        (body && body.code ? " " + body.code : ""));
     }
   }
 
   async function squarePressed(deviceId, isCurrent) {
     const now = Date.now();
     const settings = deviceSettings.get(deviceId);
-    if (!settings || settings.squareButtonShot !== true) return;
+    if (!settings || settings.squareButtonShot !== true) {
+      log("square ignored: setting is off");
+      return;
+    }
     if (squareInFlight || now - lastSquarePress < squareDebounce) return;
     lastSquarePress = now;
     squareInFlight = true;
@@ -422,18 +480,37 @@ loadMachineControl();
       const devices = await getJson("/devices");
       const primary = Array.isArray(devices) && devices.some(entry =>
         entry && entry.id === deviceId && entry.connectionRole === "primary");
-      if (!primary || !isCurrent()) return;
+      if (!isCurrent()) return;
+      if (!primary) {
+        log("square ignored: not the primary scale");
+        return;
+      }
       const snapshot = await getJson("/machine/state");
       const machineState = snapshot && snapshot.state && snapshot.state.state;
       if (!isCurrent()) return;
       if (machineState === "espresso") {
+        log("square: stopping shot");
         await requestMachineState("idle");
       } else if (machineState === "idle") {
         const info = await getJson("/machine/info");
-        if (info && info.GHC === false && isCurrent()) await requestMachineState("espresso");
+        if (!isCurrent()) return;
+        if (info && info.GHC === false) {
+          log("square: starting espresso");
+          await requestMachineState("espresso");
+        } else if (info && info.GHC === true) {
+          log("square ignored: group head controller present; start on the group head");
+          if (now - lastGhcNotice >= ghcNoticeInterval) {
+            lastGhcNotice = now;
+            notifyGhc(deviceId);
+          }
+        } else {
+          log("square ignored: machine info unavailable");
+        }
+      } else {
+        log("square ignored: machine state " + machineState);
       }
-    } catch (_) {
-      // Machine reads are best effort; a failed press does nothing.
+    } catch (error) {
+      log("square failed: " + errorMessage(error));
     } finally {
       squareInFlight = false;
     }
@@ -461,6 +538,11 @@ loadMachineControl();
           clearTimeout(pending.timer);
           pending.resolve();
         }
+      } else if (event.name === "notificationResult" && event.payload && ghcNoticeRequest != null &&
+                 event.payload.requestId === ghcNoticeRequest &&
+                 event.payload.status === "rejected") {
+        log("group head controller notice rejected: " + event.payload.reason);
+        if (event.payload.reason === "validation") notifyGhc(null);
       }
     },
     onLoad() {
@@ -609,6 +691,7 @@ loadMachineControl();
               };
               active = state;
               instanceControls.set(deviceId, applySettings);
+              log("connect " + deviceId);
               const firstWeight = new Promise((resolve, reject) => {
                 state.resolve = resolve;
                 state.reject = reject;
@@ -686,6 +769,7 @@ loadMachineControl();
                 }
                 await firstWeight;
               } catch (error) {
+                log("connect " + deviceId + " failed: " + errorMessage(error));
                 stop(state);
                 fail(state, error);
                 throw error;
@@ -748,6 +832,9 @@ loadMachineControl();
       }).then(async () => {
         const update = instanceControls.get(deviceId);
         if (update) await update(settings);
+        if (!settings.squareButtonShot) {
+          try { host.dismissNotification(ghcNoticeId); } catch (_) {}
+        }
         return jsonResponse(200, {
           deviceId,
           ...settings,

@@ -21,6 +21,7 @@ let deferWriteAcks = false;
 const deferredWriteAcks = [];
 const state = {weight: null, infos: [], writes: []};
 let pluginsList = null;
+let machineInfo = {model: 'DE1', GHC: false};
 let grantStatus = 200;
 const grantRequests = [];
 
@@ -63,6 +64,7 @@ test.beforeAll(async () => {
     let body = ''; for await (const chunk of req) body += chunk;
     const query = Object.fromEntries(url.searchParams);
     if (url.pathname === '/scale/state') return response(res, 200, state);
+    if (url.pathname === '/api/v1/machine/info') return machineInfo ? response(res, 200, machineInfo) : response(res, 404, {error: 'No DE1 connected'});
     if (url.pathname === '/api/v1/plugins') return pluginsList ? response(res, 200, pluginsList) : response(res, 404, {error: 'not found'});
     if (url.pathname === '/api/v1/plugins/skale.reaplugin/machine-control' && req.method === 'PUT') {
       grantRequests.push(JSON.parse(body));
@@ -179,7 +181,7 @@ test('allows machine control only after the user confirms on the page', async ({
   grantStatus = 200;
   pluginsList = [{id: 'skale.reaplugin', machineControl: false}];
   await page.goto(`${baseUrl}/settings?ui=1&deviceId=scale-1`);
-  await expect(page.locator('#machineControlText')).toHaveText('To start shots from the scale, Decaid must allow this plugin to control the machine.');
+  await expect(page.locator('#machineControlText')).toHaveText('To start or stop shots from the scale, Decaid must allow this plugin to control the machine.');
   await expect(page.locator('#machineControl')).toHaveClass(/pu-warn/);
   await page.locator('#grant').click();
   await expect(page.locator('#grantConfirm')).toBeVisible();
@@ -201,6 +203,28 @@ test('allows machine control only after the user confirms on the page', async ({
   expect(grantRequests).toHaveLength(2);
   grantStatus = 200;
   pluginsList = null;
+});
+
+test('explains the square button for machines with and without a group head controller', async ({page}) => {
+  const label = page.locator('#squareLabel');
+  const hint = page.locator('#squareHint');
+  await page.goto(`${baseUrl}/settings?ui=1&deviceId=scale-1`);
+  await expect(label).toHaveText('Square button starts and stops a shot');
+  await expect(hint).toContainText('starts espresso while the machine is idle');
+  await expect(hint).not.toContainText('not connected');
+
+  machineInfo = {model: 'DE1XXL', version: '1358', GHC: true};
+  await page.reload();
+  await expect(label).toHaveText('Square button stops a shot');
+  await expect(hint).toContainText('Your DE1 has a group head controller, so start espresso on the group head.');
+  await expect(hint).toContainText('stops a running shot');
+
+  machineInfo = null;
+  await page.reload();
+  await expect(label).toHaveText('Square button starts and stops a shot');
+  await expect(hint).toContainText('Decaid is not connected to the machine right now.');
+  await expect(page.locator('#save')).toBeEnabled();
+  machineInfo = {model: 'DE1', GHC: false};
 });
 
 test('shows the first-connect header until the device settings are saved', async ({page}) => {

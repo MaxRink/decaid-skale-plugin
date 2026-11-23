@@ -58,8 +58,14 @@ function harness({ackReads = true, ackWrites = true} = {}) {
   let driver;
   const store = new Map();
   const storageCalls = [];
+  const logs = [];
+  const notices = [];
+  const dismissed = [];
   let plugin;
   const host = {
+    log(message) { logs.push(message); },
+    notify(notice) { notices.push(notice); return `request-${notices.length}`; },
+    dismissNotification(id) { dismissed.push(id); },
     devices: {bindDriver(id, value) { assert.equal(id, "skale"); driver = value; }},
     storage(command) {
       storageCalls.push(command);
@@ -75,7 +81,7 @@ function harness({ackReads = true, ackWrites = true} = {}) {
   };
   plugin = createPlugin(host);
   plugin.onLoad();
-  return {plugin, driver, store, storageCalls};
+  return {plugin, driver, store, storageCalls, logs, notices, dismissed};
 }
 
 test("registers current settings surface and keeps two bindings independent", async () => {
@@ -359,10 +365,170 @@ test("square button starts and stops shots only for the opted-in primary scale",
   }
 });
 
+function machineApi(api) {
+  const calls = [];
+  const fetch = async (url, options = {}) => {
+    const path = url.replace("http://localhost:8080/api/v1", "");
+    calls.push(`${options.method || "GET"} ${path}`);
+    const reply = (status, body) => ({status, ok: status >= 200 && status < 300, async json() { return body; }});
+    if (path === "/devices") return reply(200, [{id: "a", connectionRole: api.role}]);
+    if (path === "/machine/state") return reply(200, {state: {state: api.state, substate: "idle"}});
+    if (path === "/machine/info") return api.info ? reply(200, api.info) : reply(404, {error: "not connected"});
+    if (options.method === "PUT") return reply(api.putStatus || 200, api.putBody || null);
+    return reply(404, {});
+  };
+  return {calls, fetch};
+}
+
+async function connected(harnessResult, id = "a") {
+  const session = fakeSession(id);
+  const adapter = harnessResult.driver.create({id});
+  const connecting = adapter.connect(session);
+  await new Promise(resolve => setTimeout(resolve, 2150));
+  await Promise.all([session.emitWeight(), connecting]);
+  return {session, adapter};
+}
+
+test("GHC machine: idle press posts one rate-limited notice, a running shot still stops", async () => {
+  const oldFetch = global.fetch;
+  const realNow = Date.now;
+  const api = {role: "primary", state: "idle", info: {model: "DE1XXL", version: "1358", GHC: true}};
+  const {calls, fetch} = machineApi(api);
+  global.fetch = fetch;
+  const h = harness();
+  const {plugin, notices, dismissed} = h;
+  const {session, adapter} = await connected(h);
+  const flush = () => new Promise(resolve => setImmediate(resolve));
+  let clock = 1e9;
+  Date.now = () => clock;
+  const press = async (advance = 5000) => { clock += advance; await session.emitButton(2); await flush(); };
+  const puts = () => calls.filter(call => call.startsWith("PUT"));
+  try {
+    await plugin.handleHttpRequest({method: "POST", query: {deviceId: "a"}, body: {usbPower: false, squareButtonShot: true}});
+    await press();
+    assert.deepEqual(puts(), [], "idle on a GHC machine never requests espresso");
+    assert.equal(notices.length, 1);
+    assert.equal(notices[0].id, "group-head-controller");
+    assert.match(notices[0].message, /group head controller/);
+    assert.ok(notices[0].message.length <= 600);
+    assert.deepEqual(notices[0].action, {id: "settings", label: "Settings", type: "openPluginSurface", surfaceId: "settings", deviceId: "a"});
+
+    await press();
+    await press(9 * 60 * 1000);
+    assert.equal(notices.length, 1, "repeat presses within ten minutes post nothing");
+    await press(60 * 1000);
+    assert.equal(notices.length, 2, "a press after ten minutes repeats the notice");
+
+    plugin.onEvent({name: "notificationResult", payload: {requestId: "request-2", id: "group-head-controller", status: "rejected", reason: "validation"}});
+    assert.equal(notices.length, 3, "a host without openPluginSurface gets the notice without the action");
+    assert.deepEqual(notices[2], {id: "group-head-controller", message: notices[0].message});
+    plugin.onEvent({name: "notificationResult", payload: {requestId: "request-3", id: "group-head-controller", status: "rejected", reason: "validation"}});
+    assert.equal(notices.length, 3, "the plain notice is not republished");
+
+    api.state = "espresso";
+    await press();
+    assert.deepEqual(puts(), ["PUT /machine/state/idle"], "the square button stops a shot on a GHC machine");
+
+    await plugin.handleHttpRequest({method: "POST", query: {deviceId: "a"}, body: {usbPower: false, squareButtonShot: false}});
+    assert.deepEqual(dismissed, ["group-head-controller"], "turning the setting off withdraws the notice");
+  } finally {
+    Date.now = realNow;
+    global.fetch = oldFetch;
+    await adapter.disconnect(session);
+    plugin.onUnload();
+  }
+});
+
+test("logs connect, settings and square-button decisions without per-sample noise", async () => {
+  const oldFetch = global.fetch;
+  const realNow = Date.now;
+  const api = {role: "auxiliary", state: "idle", info: {GHC: false}};
+  global.fetch = machineApi(api).fetch;
+  const h = harness();
+  const {plugin, logs, store} = h;
+  const {session, adapter} = await connected(h);
+  let clock = 1e9;
+  Date.now = () => clock;
+  const press = async () => { clock += 5000; await session.emitButton(2); await new Promise(resolve => setImmediate(resolve)); };
+  try {
+    assert.deepEqual(logs, ["[skale] connect a"]);
+    for (let i = 0; i < 50; i++) await session.emitWeight();
+    assert.equal(logs.length, 1, "weight samples are never logged");
+
+    await press();
+    await plugin.handleHttpRequest({method: "POST", query: {deviceId: "a"}, body: {usbPower: false, squareButtonShot: true}});
+    await press();
+    api.role = "primary";
+    api.state = "steam";
+    await press();
+    api.state = "idle";
+    api.putStatus = 403;
+    api.putBody = {code: "machine_control_not_granted"};
+    await press();
+    api.putStatus = 500;
+    api.putBody = {};
+    await press();
+    assert.deepEqual(logs.slice(1), [
+      "[skale] square ignored: setting is off",
+      "[skale] square ignored: not the primary scale",
+      "[skale] square ignored: machine state steam",
+      "[skale] square: starting espresso",
+      "[skale] square: machine control not granted (403)",
+      "[skale] square: starting espresso",
+      "[skale] square: PUT machine/state/espresso failed: HTTP 500",
+    ]);
+
+    store.set("skale.reaplugin.device.bad", {usbPower: "yes"});
+    const bad = fakeSession("bad");
+    await assert.rejects(h.driver.create({id: "bad"}).connect(bad), /Skale settings unavailable/);
+    assert.deepEqual(logs.slice(-3), [
+      "[skale] connect bad",
+      "[skale] settings unavailable for bad: stored value is malformed",
+      "[skale] connect bad failed: Skale settings unavailable",
+    ]);
+  } finally {
+    Date.now = realNow;
+    global.fetch = oldFetch;
+    await adapter.disconnect(session);
+    plugin.onUnload();
+  }
+});
+
+test("reconnect right after plugin load waits for the storage read instead of failing", async () => {
+  // Host storage answers asynchronously; a slow first read must delay, not fail, connect.
+  let pendingAck;
+  let plugin;
+  let driver;
+  const host = {
+    log() {},
+    devices: {bindDriver(_id, value) { driver = value; }},
+    storage(command) {
+      if (command.type === "read") {
+        pendingAck = () => plugin.onEvent({name: "storageRead", payload: {key: command.key, value: {usbPower: true, squareButtonShot: true}}});
+      }
+    },
+  };
+  plugin = createPlugin(host);
+  plugin.onLoad();
+  const session = fakeSession("a");
+  const adapter = driver.create({id: "a"});
+  const connecting = adapter.connect(session);
+  await new Promise(resolve => setTimeout(resolve, 200));
+  assert.equal(session.writes.length, 0, "no scale commands before settings are known");
+  pendingAck();
+  await new Promise(resolve => setTimeout(resolve, 2150));
+  await Promise.all([session.emitWeight(), connecting]);
+  assert.deepEqual(session.publications, [{weight: 1, battery: null}], "USB power from storage suppresses the battery");
+  await adapter.disconnect(session);
+  plugin.onUnload();
+});
+
 test("manifest claims Skales by advertised name prefix only", () => {
   const manifest = require("../manifest.json");
   assert.deepEqual(manifest.drivers[0].ble, {match: {name: {prefix: "Skale"}}});
   assert.equal(manifest.version, require("../package.json").version);
+  assert.ok(manifest.permissions.includes("log"), "diagnostics need the log permission");
+  assert.ok(manifest.permissions.includes("notifications"), "the GHC notice needs notifications");
 });
 
 test("settings page inlines the vendored plugin-ui kit", () => {

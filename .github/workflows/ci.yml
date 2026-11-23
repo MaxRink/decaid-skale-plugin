@@ -91,13 +91,13 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: decentespresso/decaid
-          ref: bafa9b3f2b90e65334e990b0b9601a9965cf979b
+          ref: 1d74fbf7a5eb3a5ba5208b4147aea136726a4909
           path: decaid-host
           fetch-depth: 1
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
-          flutter-version: 3.44.2
+          flutter-version: 3.47.9
           cache: true
       - uses: actions/setup-node@v7
         with:
@@ -112,6 +112,7 @@ jobs:
           mkdir -p assets/bundled_skins
           printf '["stub-skin"]\n' > assets/bundled_skins/manifest.json
           : > assets/bundled_skins/stub-skin.zip
+          mkdir -p assets/plugins/dye2.reaplugin assets/plugins/shot-upload.reaplugin assets/plugins/dcamp.reaplugin
       - name: Add external package contract probe
         run: cp ci/validate-host-contract.dart decaid-host/tool/validate-skale-contract.dart
       - name: Build local install package

@@ -22,6 +22,8 @@ void main(List<String> args) {
       !permissions.contains('transport.ble') ||
       !permissions.contains('api') ||
       !permissions.contains('pluginStorage') ||
+      !permissions.contains('log') ||
+      !permissions.contains('notifications') ||
       driver['type'] != 'scale' ||
       !capabilities.contains('battery') ||
       !capabilities.contains('tare') ||

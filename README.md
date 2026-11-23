@@ -7,12 +7,18 @@ installation.
 
 ## Installation
 
-This plugin requires a Decaid build containing the runtime-v2 plugin contract:
-BLE `bindDriver`, four-binding admission, session `publishInfo`, validated
-driver `surfaces`, and `pluginStorage`. The contract was present on Decaid
-main at `bafa9b3f2b90e65334e990b0b9601a9965cf979b` (2026-10-13). The stable
-`0.8.8` release predates the final settings-surface and Scale metadata pieces;
-use a newer host build and check its plugin documentation before installing.
+Version 0.4.1 requires a Decaid build containing the runtime-v2 plugin contract
+(BLE `bindDriver`, four-binding admission, session `publishInfo`, validated
+driver `surfaces`, `pluginStorage`) and the `log` and `notifications`
+permissions. Decaid main has all of them from the native notification center
+(decentespresso/decaid#1003, 2026-11-03); CI runs against main at
+`1d74fbf7a5eb3a5ba5208b4147aea136726a4909` (2026-11-23). Older hosts reject the
+unknown `notifications` permission and do not load the plugin; stay on 0.4.0
+there. The stable `0.8.8` release predates the settings-surface and Scale
+metadata pieces.
+
+Updating from 0.4.0 adds the `log` and `notifications` permissions, so Decaid
+holds the update as pending until you approve it in Settings > Plugins.
 
 Decaid can install this repository directly from its GitHub branch installer:
 
@@ -30,8 +36,8 @@ single ZIP matches the manifest version. A local build can use
 has the required runtime files and licence notices at its root.
 
 The plugin id is `skale.reaplugin`. After installation, enable it in Decaid's
-plugin management UI and grant the requested BLE, API, and plugin-storage
-permissions. The settings action is provided by the declared `settings`
+plugin management UI and grant the requested BLE, API, plugin-storage, log and
+notification permissions. The settings action is provided by the declared `settings`
 surface; its `deviceId` and optional display name are supplied by Decaid's
 device-management authority.
 
@@ -67,7 +73,7 @@ is tolerated so weight remains usable.
 
 ### Square button shot start/stop
 
-The per-device setting **Square button starts/stops a shot** is off by default.
+The per-device setting **Square button starts and stops a shot** is off by default.
 When it is on, a square press (`0x02`) follows the
 `BLE notification -> Skale plugin -> Decaid HTTP API -> machine action` path of
 decentespresso/decaid#715, with no Skale-specific code in Decaid:
@@ -75,24 +81,47 @@ decentespresso/decaid#715, with no Skale-specific code in Decaid:
 1. `GET /api/v1/devices` must list this binding with `connectionRole: "primary"`.
    Auxiliary bindings never act.
 2. `GET /api/v1/machine/state` is read at press time. `espresso` sends
-   `PUT /api/v1/machine/state/idle` (stop).
-3. `idle` sends `PUT /api/v1/machine/state/espresso` only when
-   `GET /api/v1/machine/info` reports `GHC: false`. GHC `true` or unknown does
-   nothing, because a group head controller starts shots on the machine itself.
+   `PUT /api/v1/machine/state/idle` (stop), with or without a group head
+   controller.
+3. `idle` reads `GET /api/v1/machine/info` and sends
+   `PUT /api/v1/machine/state/espresso` only when it reports `GHC: false`.
 4. Every other state, including `sleeping`, does nothing. The plugin never wakes
    the machine.
+
+**DE1 with a group head controller (`GHC: true`).** The group head starts shots;
+the app may only stop them. On such a machine the square button stops a running
+shot and does nothing while the machine is idle:
+
+- The settings page reads `GET /api/v1/machine/info`. With `GHC: true` the switch
+  is labelled **Square button stops a shot** and its hint says to start espresso
+  on the group head. If Decaid is not connected to the machine, the page keeps the
+  general label and adds that, with a group head controller, the button can only
+  stop a shot.
+- A press while idle posts one Decaid notice, "Your DE1 has a group head
+  controller, so the Skale square button cannot start espresso. Start the shot on
+  the group head; the square button can stop it.", with a **Settings** action that
+  opens this device's settings page. It is posted at most once every ten minutes.
+  Hosts without the `openPluginSurface` action reject it as `validation`; the
+  plugin then posts the same notice without the action. Turning the setting off
+  withdraws the notice.
+- If `machine/info` has no boolean `GHC` (machine not connected), an idle press
+  does nothing.
+
+**Without a group head controller (`GHC: false`)** the button starts espresso
+while the machine is idle and stops a running shot.
 
 Presses within one second of the last accepted press, or while a previous press
 is still talking to Decaid, are ignored. A press from a retired session, or a
 session retired while its requests are in flight, does nothing.
 
-Decaid builds with plugin machine-control hardening answer the `PUT` with `403`
-and `code: "machine_control_not_granted"` until the user allows it. The plugin
-does not retry; the settings page shows "Allow machine control for the Skale
-plugin in Decaid Settings > Plugins" until a later press succeeds. Stock Decaid
-accepts the `PUT` without a grant.
-No new manifest permission is required: the plugin uses its existing `api`
-permission.
+**Machine control grant.** Decaid builds with plugin machine-control hardening
+answer both the start and the stop `PUT` with `403` and
+`code: "machine_control_not_granted"` until the user allows it, and show their
+own "Allow Skale Scale to control the machine?" notice. The plugin does not
+retry; the settings page shows "Allow machine control for the Skale plugin in
+Decaid Settings > Plugins" until a later press succeeds, and offers the in-page
+**Allow in Decaid** row described below. Stock Decaid accepts the `PUT` without a
+grant. The grant is a host setting, not a manifest permission.
 
 The setting is stored with the USB power setting in the plugin's namespaced
 `pluginStorage` and survives plugin reload. Decaid's `/api/v1/data/export`
@@ -112,7 +141,9 @@ works inside a Streamline dialog or Decaid's surface sheet.
 - **First connect.** Until settings are saved for a device, the page opens with a
   "Set up your Skale" header that says what the plugin does.
 - **USB powered** and **Square button starts and stops a shot** are switches with
-  a plain-language description each. Both are off by default.
+  a plain-language description each. Both are off by default. On a DE1 with a
+  group head controller the second switch reads **Square button stops a shot**
+  (see above).
 - **Machine control.** When `GET /api/v1/plugins` reports a boolean
   `machineControl` for `skale.reaplugin` (Decaid builds with the machine-control
   grant), the page shows whether it is allowed. If it is not, **Allow in Decaid**
@@ -121,6 +152,16 @@ works inside a Streamline dialog or Decaid's surface sheet.
   This is an extension-management route: with Decaid's extension protection on,
   the page says to allow it in Decaid Settings > Plugins instead. Stock hosts
   report no `machineControl`, and the row stays hidden.
+
+## Diagnostics
+
+The plugin logs through `host.log` with a `[skale]` prefix: connect start and
+failure with the error message, settings that could not be read, every square
+button decision (setting off, not the primary scale, machine state, group head
+controller, machine info unavailable, start, stop) and failed machine writes,
+including the `403` for a missing machine-control grant. Weight samples are not
+logged. Decaid writes plugin log lines at the `FINEST` level, so set Decaid's log
+level to `FINEST` (or `ALL`) to see them in the app log.
 
 Change the kit in streamline-js, never in `plugin.js`, then re-vendor it:
 
@@ -148,7 +189,8 @@ npm run test:browser
 ```
 
 The browser suite covers the settings page, persisted USB-power and square-button
-reload, the first-connect header, the machine-control hint, the grant row (hidden
+reload, the first-connect header, the machine-control hint, the square-button
+wording with and without a group head controller and with no machine, the grant row (hidden
 on stock hosts, confirm-before-grant, protection refusal), light and dark themes
 at 412px and 1280px (touch-target sizes, no horizontal overflow), the framed
 `embed=1` dialog, malformed settings rejection, weight publication, tare, and
@@ -163,9 +205,11 @@ the pinned host QuickJS runtime with fake GATT transports. It covers multi-bindi
 isolation, settings/pluginStorage persistence, nullable metadata, commands, circle
 tare, ignored unknown buttons, the square-button host API path (default off,
 auxiliary ignored, `machine_control_not_granted` hint), write failures, and
-late-event fencing. The square-button case binds a fake host API on
-`localhost:8080` for the duration of the test.
-The host is pinned to revision `bafa9b3f2b90e65334e990b0b9601a9965cf979b`.
+late-event fencing, the GHC notice through the real notification center, and a
+BLE admission refused at connect time (stale_session before the plugin runs).
+The square-button cases bind a fake host API on `localhost:8080` for the duration
+of the test.
+The host is pinned to Decaid main `1d74fbf7a5eb3a5ba5208b4147aea136726a4909`.
 
 The package is a ZIP containing only the manifest, plugin source, README and
 GPL-3.0 license. The generated ZIP is not a release or a hardware-validation
@@ -187,7 +231,16 @@ the current main pin above is the contract used by CI.
 ## Limitations
 
 No physical hardware run is included. Host platform trust and plugin transport
-permissions still apply. Self-signed TLS is unrelated to this BLE plugin and
+permissions still apply.
+
+Decaid's background scale watch cannot yet reconnect a plugin scale. When the
+watch sights the remembered Skale it stops its scan, which starts a new BLE
+evidence generation and drops the Skale's advertisement; the plugin binding's
+admission check then finds no evidence and the host fails the connect with
+`stale_session: BLE ownership changed` before this plugin's `connect` runs. The
+app log shows "Preferred scale plugin:skale.reaplugin:… sighted" followed within
+about 10 ms by "Scale failed to connect (onConnect threw)". The scale connects on
+the next full scan instead. The fix belongs in Decaid's BLE discovery service. Self-signed TLS is unrelated to this BLE plugin and
 must be solved in the host/E64 plugin separately.
 
 ## Releases

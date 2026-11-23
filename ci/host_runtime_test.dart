@@ -10,6 +10,7 @@ import 'package:reaprime/src/plugins/plugin_manifest.dart';
 import 'package:reaprime/src/plugins/plugin_scale.dart';
 import 'package:reaprime/src/plugins/plugin_ble_matcher.dart';
 import 'package:reaprime/src/plugins/plugin_ble_registry.dart';
+import 'package:reaprime/src/plugins/plugin_ble_session.dart';
 
 import '../helpers/plugin_ble_fixture.dart';
 import 'plugin_test_helpers.dart';
@@ -418,6 +419,125 @@ void main() {
     requests.clear();
     await press();
     expect(requests, isEmpty);
+  });
+
+  test('a refused BLE admission fails connect before the plugin runs', () async {
+    // Mirrors the live watch-reconnect failure: the host's admit() refuses the
+    // candidate, so onConnect throws stale_session before the plugin's connect
+    // is invoked and before any GATT transport is created.
+    final root = Platform.environment['SKALE_PLUGIN_ROOT'] ?? '.';
+    final manifest = PluginManifest.fromJson(
+      jsonDecode(File('$root/manifest.json').readAsStringSync())
+          as Map<String, dynamic>,
+    );
+    final manager = PluginManager(
+      kvStore: FakeKeyValueStoreService(),
+      bleRegistry: PluginBleRegistry(activeBindingLimit: 4),
+    );
+    addTearDown(manager.dispose);
+    await manager.loadPlugin(
+      id: manifest.id,
+      manifest: manifest,
+      settings: const {},
+      jsCode: File('$root/plugin.js').readAsStringSync(),
+    );
+    final evidence = BleAdvertisementEvidence(name: 'Skale2', serviceUuids: const [_service]);
+    var transports = 0;
+    var admitted = true;
+    final scale = await manager.bleService.createCandidate(
+      driver: manager.bleService.registry.decide(evidence).drivers.single,
+      physicalId: 'EE:05',
+      evidence: evidence,
+      admit: () => admitted,
+      createTransport: () {
+        transports++;
+        return _SkaleTransport('EE:05');
+      },
+    ) as Scale;
+    // Sighted and admitted, then the watch stops and admission is refused.
+    admitted = false;
+    await expectLater(
+      scale.onConnect(),
+      throwsA(isA<PluginBleException>().having((e) => e.code, 'code', 'stale_session')),
+    );
+    expect(transports, 0);
+  });
+
+  test('square press on a GHC machine posts one notice and starts nothing', () async {
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 8080);
+    addTearDown(() => server.close(force: true));
+    final requests = <String>[];
+    late String deviceId;
+    server.listen((request) async {
+      requests.add('${request.method} ${request.uri.path}');
+      final body = switch (request.uri.path) {
+        '/api/v1/devices' => [{'id': deviceId, 'connectionRole': 'primary'}],
+        '/api/v1/machine/state' => {'state': {'state': 'idle', 'substate': 'idle'}},
+        '/api/v1/machine/info' => {'model': 'DE1XXL', 'version': '1358', 'GHC': true},
+        _ => <String, dynamic>{},
+      };
+      request.response.write(jsonEncode(body));
+      await request.response.close();
+    });
+    final root = Platform.environment['SKALE_PLUGIN_ROOT'] ?? '.';
+    final manifest = PluginManifest.fromJson(
+      jsonDecode(File('$root/manifest.json').readAsStringSync())
+          as Map<String, dynamic>,
+    );
+    final manager = PluginManager(
+      kvStore: FakeKeyValueStoreService(),
+      bleRegistry: PluginBleRegistry(activeBindingLimit: 4),
+    );
+    addTearDown(manager.dispose);
+    await manager.loadPlugin(
+      id: manifest.id,
+      manifest: manifest,
+      settings: const {},
+      jsCode: File('$root/plugin.js').readAsStringSync(),
+    );
+    final evidence = BleAdvertisementEvidence(name: 'Skale2', serviceUuids: const [_service]);
+    late _SkaleTransport transport;
+    final scale = await manager.bleService.createCandidate(
+      driver: manager.bleService.registry.decide(evidence).drivers.single,
+      physicalId: 'FF:06',
+      evidence: evidence,
+      admit: () => true,
+      createTransport: () {
+        transport = _SkaleTransport('FF:06');
+        transport.queueRead(_battery, Uint8List.fromList(const [87]));
+        transport.queueRead(_firmware, Uint8List.fromList(utf8.encode('R-FF')));
+        return transport;
+      },
+    ) as Scale;
+    deviceId = scale.deviceId;
+    final connect = scale.onConnect();
+    (scale as ScaleSnapshotHandoff).activateSnapshots();
+    final weightPump = Timer.periodic(const Duration(milliseconds: 100), (_) {
+      transport.emitWeight();
+    });
+    try {
+      await connect;
+    } finally {
+      weightPump.cancel();
+    }
+    final enabled = await _request(manager, manifest.id, 'ghc-square-on', {
+      'method': 'POST',
+      'query': {'deviceId': deviceId},
+      'body': {'usbPower': false, 'squareButtonShot': true},
+    });
+    expect(enabled['status'], 200);
+    for (var i = 0; i < 2; i++) {
+      transport.emitButton(2);
+      await Future<void>.delayed(const Duration(milliseconds: 1200));
+    }
+    expect(requests.where((request) => request.startsWith('PUT')), isEmpty);
+    final notices = manager.notifications.value
+        .where((notice) => notice.sourceId == manifest.id)
+        .toList();
+    expect(notices, hasLength(1));
+    expect(notices.single.id, 'group-head-controller');
+    expect(notices.single.message, contains('group head controller'));
+    await scale.disconnect();
   });
 
   test('invalid battery and firmware reads publish nullable metadata', () async {
