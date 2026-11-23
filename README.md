@@ -89,9 +89,8 @@ session retired while its requests are in flight, does nothing.
 Decaid builds with plugin machine-control hardening answer the `PUT` with `403`
 and `code: "machine_control_not_granted"` until the user allows it. The plugin
 does not retry; the settings page shows "Allow machine control for the Skale
-plugin in Decaid Settings > Plugins" until a later press succeeds. When the host
-reports a per-plugin `machineControl` grant in `GET /api/v1/plugins`, the
-settings page shows its state. Stock Decaid accepts the `PUT` without a grant.
+plugin in Decaid Settings > Plugins" until a later press succeeds. Stock Decaid
+accepts the `PUT` without a grant.
 No new manifest permission is required: the plugin uses its existing `api`
 permission.
 
@@ -100,6 +99,37 @@ The setting is stored with the USB power setting in the plugin's namespaced
 currently omits plugin storage namespaces (its `store.json` section lists only
 the REST key-value store), so this setting, like USB power, is not carried by a
 Decaid backup. Re-enable it after restoring onto a new device.
+
+## Settings page
+
+The `device-settings` surface uses the shared
+[`plugin-ui` kit](https://github.com/MaxRink/streamline-js/tree/f814285874bc2c7a6e8790fae5ce3762dffbf8bb/docs/plugin-ui),
+vendored into `plugin.js` between the `plugin-ui:begin`/`plugin-ui:end` markers.
+It follows the host's `theme=light|dark` (otherwise the system preference) and,
+with `embed=1`, hides its Done button and keeps its background transparent so it
+works inside a Streamline dialog or Decaid's surface sheet.
+
+- **First connect.** Until settings are saved for a device, the page opens with a
+  "Set up your Skale" header that says what the plugin does.
+- **USB powered** and **Square button starts and stops a shot** are switches with
+  a plain-language description each. Both are off by default.
+- **Machine control.** When `GET /api/v1/plugins` reports a boolean
+  `machineControl` for `skale.reaplugin` (Decaid builds with the machine-control
+  grant), the page shows whether it is allowed. If it is not, **Allow in Decaid**
+  asks for confirmation on the page, and only the confirm button sends
+  `PUT /api/v1/plugins/skale.reaplugin/machine-control` with `{"granted": true}`.
+  This is an extension-management route: with Decaid's extension protection on,
+  the page says to allow it in Decaid Settings > Plugins instead. Stock hosts
+  report no `machineControl`, and the row stays hidden.
+
+Change the kit in streamline-js, never in `plugin.js`, then re-vendor it:
+
+```sh
+node <streamline-js>/docs/plugin-ui/vendor.mjs inject plugin.js \
+  https://raw.githubusercontent.com/MaxRink/streamline-js/<commit>/docs/plugin-ui
+```
+
+CI checks the vendored copy against the pinned kit with `vendor.mjs check`.
 
 ## Development
 
@@ -118,8 +148,11 @@ npm run test:browser
 ```
 
 The browser suite covers the settings page, persisted USB-power and square-button
-reload, the machine-control hint and grant indicator, malformed settings
-rejection, weight publication, tare, and circle-button tare.
+reload, the first-connect header, the machine-control hint, the grant row (hidden
+on stock hosts, confirm-before-grant, protection refusal), light and dark themes
+at 412px and 1280px (touch-target sizes, no horizontal overflow), the framed
+`embed=1` dialog, malformed settings rejection, weight publication, tare, and
+circle-button tare.
 CI runs it on Node 24 alongside the native Node matrix.
 
 GitHub Actions runs the protocol/session suite and package-root checks on Node

@@ -239,7 +239,7 @@ void main() {
       'query': {'deviceId': 'AA:01'},
     });
     expect(initial['status'], 200);
-    expect(jsonDecode(initial['body'] as String), {'deviceId': 'AA:01', 'usbPower': false, 'squareButtonShot': false});
+    expect(jsonDecode(initial['body'] as String), {'deviceId': 'AA:01', 'usbPower': false, 'squareButtonShot': false, 'firstConnect': true});
     final invalid = await _request(manager, manifest.id, 'settings-post-invalid', {
       'method': 'POST',
       'query': {'deviceId': 'AA:01'},
@@ -259,6 +259,7 @@ void main() {
     });
     expect(ui['status'], 200);
     expect(ui['body'], contains('Skale settings'));
+    expect(ui['body'], contains('<body class="pu">'));
     await manager.dispose();
 
     final reloaded = PluginManager(kvStore: store);

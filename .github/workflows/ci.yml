@@ -42,6 +42,24 @@ jobs:
           path: dist/*.zip
           if-no-files-found: error
 
+  plugin-ui:
+    name: Vendored plugin-ui kit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Checkout pinned plugin-ui kit
+        uses: actions/checkout@v5
+        with:
+          repository: MaxRink/streamline-js
+          ref: f814285874bc2c7a6e8790fae5ce3762dffbf8bb
+          path: streamline-js
+          fetch-depth: 1
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24.x
+      - name: Check the vendored kit matches the pinned source
+        run: node streamline-js/docs/plugin-ui/vendor.mjs check plugin.js streamline-js/docs/plugin-ui
+
   playwright:
     name: Playwright browser contract
     runs-on: ubuntu-latest

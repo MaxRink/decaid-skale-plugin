@@ -224,7 +224,10 @@ test("stored settings default square button off and reject malformed values", as
   const legacy = await plugin.handleHttpRequest({method: "GET", query: {deviceId: "legacy"}});
   assert.deepEqual(JSON.parse(legacy.body), {deviceId: "legacy", usbPower: true, squareButtonShot: false});
   const fresh = await plugin.handleHttpRequest({method: "GET", query: {deviceId: "fresh"}});
-  assert.deepEqual(JSON.parse(fresh.body), {deviceId: "fresh", usbPower: false, squareButtonShot: false});
+  assert.deepEqual(JSON.parse(fresh.body), {deviceId: "fresh", usbPower: false, squareButtonShot: false, firstConnect: true});
+  await plugin.handleHttpRequest({method: "POST", query: {deviceId: "fresh"}, body: {usbPower: false, squareButtonShot: false}});
+  const saved = await plugin.handleHttpRequest({method: "GET", query: {deviceId: "fresh"}});
+  assert.deepEqual(JSON.parse(saved.body), {deviceId: "fresh", usbPower: false, squareButtonShot: false}, "saving ends first connect");
   assert.equal((await plugin.handleHttpRequest({method: "GET", query: {deviceId: "bad"}})).status, 503);
   plugin.onUnload();
 });
@@ -360,4 +363,18 @@ test("manifest claims Skales by advertised name prefix only", () => {
   const manifest = require("../manifest.json");
   assert.deepEqual(manifest.drivers[0].ble, {match: {name: {prefix: "Skale"}}});
   assert.equal(manifest.version, require("../package.json").version);
+});
+
+test("settings page inlines the vendored plugin-ui kit", () => {
+  const source = require("node:fs").readFileSync(require.resolve("../plugin.js"), "utf8");
+  const kit = JSON.parse(/const PLUGIN_UI = (.*);\n/.exec(source)[1]);
+  const {plugin} = harness();
+  const page = plugin.handleHttpRequest({method: "GET", query: {ui: "1"}});
+  assert.equal(page.status, 200);
+  assert.ok(page.body.includes(`<style>${kit.css}</style>`));
+  assert.ok(page.body.includes(`<script>${kit.js}</script>`));
+  assert.match(page.body, /<body class="pu">/);
+  assert.match(page.body, /data-pu-done/);
+  assert.equal(page.body.match(/<\/script>/g).length, 2);
+  plugin.onUnload();
 });

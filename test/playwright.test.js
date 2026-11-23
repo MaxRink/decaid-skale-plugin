@@ -21,6 +21,8 @@ let deferWriteAcks = false;
 const deferredWriteAcks = [];
 const state = {weight: null, infos: [], writes: []};
 let pluginsList = null;
+let grantStatus = 200;
+const grantRequests = [];
 
 function response(res, status, body, headers = {'content-type': 'application/json'}) {
   res.writeHead(status, headers);
@@ -62,6 +64,12 @@ test.beforeAll(async () => {
     const query = Object.fromEntries(url.searchParams);
     if (url.pathname === '/scale/state') return response(res, 200, state);
     if (url.pathname === '/api/v1/plugins') return pluginsList ? response(res, 200, pluginsList) : response(res, 404, {error: 'not found'});
+    if (url.pathname === '/api/v1/plugins/skale.reaplugin/machine-control' && req.method === 'PUT') {
+      grantRequests.push(JSON.parse(body));
+      if (grantStatus !== 200) return response(res, grantStatus, {error: 'Extension management requires a token'});
+      pluginsList = pluginsList.map(entry => entry.id === 'skale.reaplugin' ? {...entry, machineControl: true} : entry);
+      return response(res, 200, {id: 'skale.reaplugin', machineControl: true});
+    }
     if (url.pathname === '/scale/control') {
       const value = body ? JSON.parse(body) : {};
       if (value.action === 'weight') await weightCallback(b64([0, 25, 0, 0]), {at: Date.now()});
@@ -150,17 +158,119 @@ test('shows the machine-control grant message after a denied square press', asyn
   await expect(page.locator('#status')).toHaveText('Allow machine control for the Skale plugin in Decaid Settings > Plugins');
 });
 
-test('shows the host machine-control grant only when the host reports it', async ({page}) => {
+test('hides the machine-control row on stock hosts and shows the fork grant state', async ({page}) => {
+  pluginsList = null;
   await page.goto(`${baseUrl}/settings?ui=1&deviceId=scale-1`);
   await expect(page.locator('#save')).toBeEnabled();
   await expect(page.locator('#machineControl')).toBeHidden();
-  for (const [granted, text] of [[false, 'Allow machine control for the Skale plugin in Decaid Settings > Plugins.'],
-    [true, 'Decaid allows the Skale plugin to control the machine.']]) {
-    pluginsList = [{id: 'other.reaplugin', machineControl: !granted}, {id: 'skale.reaplugin', machineControl: granted}];
-    await page.reload();
-    await expect(page.locator('#machineControl')).toHaveText(text);
-  }
+  pluginsList = [{id: 'skale.reaplugin', loaded: true}];
+  await page.reload();
+  await expect(page.locator('#save')).toBeEnabled();
+  await expect(page.locator('#machineControl')).toBeHidden();
+  pluginsList = [{id: 'other.reaplugin', machineControl: false}, {id: 'skale.reaplugin', machineControl: true}];
+  await page.reload();
+  await expect(page.locator('#machineControlText')).toHaveText('Decaid allows the Skale plugin to control the machine.');
+  await expect(page.locator('#grant')).toBeHidden();
   pluginsList = null;
+});
+
+test('allows machine control only after the user confirms on the page', async ({page}) => {
+  grantRequests.length = 0;
+  grantStatus = 200;
+  pluginsList = [{id: 'skale.reaplugin', machineControl: false}];
+  await page.goto(`${baseUrl}/settings?ui=1&deviceId=scale-1`);
+  await expect(page.locator('#machineControlText')).toHaveText('To start shots from the scale, Decaid must allow this plugin to control the machine.');
+  await expect(page.locator('#machineControl')).toHaveClass(/pu-warn/);
+  await page.locator('#grant').click();
+  await expect(page.locator('#grantConfirm')).toBeVisible();
+  await page.locator('#grantCancel').click();
+  await expect(page.locator('#grantConfirm')).toBeHidden();
+  expect(grantRequests).toEqual([]);
+  await page.locator('#grant').click();
+  await page.locator('#grantConfirmButton').click();
+  await expect(page.locator('#machineControlText')).toHaveText('Decaid allows the Skale plugin to control the machine.');
+  await expect(page.locator('#machineControl')).toHaveClass(/pu-ok/);
+  expect(grantRequests).toEqual([{granted: true}]);
+
+  grantStatus = 401;
+  pluginsList = [{id: 'skale.reaplugin', machineControl: false}];
+  await page.reload();
+  await page.locator('#grant').click();
+  await page.locator('#grantConfirmButton').click();
+  await expect(page.locator('#machineControlText')).toHaveText("Decaid's extension protection is on. Allow machine control for the Skale plugin in Decaid Settings > Plugins.");
+  expect(grantRequests).toHaveLength(2);
+  grantStatus = 200;
+  pluginsList = null;
+});
+
+test('shows the first-connect header until the device settings are saved', async ({page}) => {
+  await page.goto(`${baseUrl}/settings?ui=1&deviceId=new-skale&deviceName=New`);
+  await expect(page.locator('#welcome')).toBeVisible();
+  await expect(page.locator('#welcome h2')).toHaveText('Set up your Skale');
+  await page.locator('#save').click();
+  await expect(page.locator('#status')).toHaveText('Saved');
+  await expect(page.locator('#welcome')).toBeHidden();
+  await page.reload();
+  await expect(page.locator('#save')).toBeEnabled();
+  await expect(page.locator('#welcome')).toBeHidden();
+});
+
+for (const theme of ['light', 'dark']) {
+  for (const width of [412, 1280]) {
+    test(`renders the kit at ${width}px in the ${theme} theme`, async ({page}) => {
+      pluginsList = [{id: 'skale.reaplugin', machineControl: false}];
+      await page.setViewportSize({width, height: 900});
+      await page.goto(`${baseUrl}/settings?ui=1&deviceId=fresh-${theme}-${width}&theme=${theme}`);
+      await expect(page.locator('#save')).toBeEnabled();
+      await expect(page.locator('#machineControl')).toBeVisible();
+      const layout = await page.evaluate(() => ({
+        overflow: document.documentElement.scrollWidth > window.innerWidth,
+        theme: document.documentElement.dataset.theme,
+        scheme: getComputedStyle(document.documentElement).colorScheme,
+        background: getComputedStyle(document.querySelector('.pu-page')).backgroundColor,
+        buttons: [...document.querySelectorAll('button')].filter(b => b.offsetParent).map(b => b.getBoundingClientRect().height),
+        rows: [...document.querySelectorAll('.pu-row')].map(r => r.getBoundingClientRect().height),
+      }));
+      expect(layout.overflow).toBe(false);
+      expect(layout.theme).toBe(theme);
+      expect(layout.scheme).not.toBe('dark');
+      expect(layout.background).toBe(theme === 'dark' ? 'rgb(16, 18, 23)' : 'rgb(255, 255, 255)');
+      expect(Math.min(...layout.buttons)).toBeGreaterThanOrEqual(56);
+      expect(Math.min(...layout.rows)).toBeGreaterThanOrEqual(48);
+      pluginsList = null;
+    });
+  }
+}
+
+test('follows the embedding skin theme and works framed like the Streamline dialog', async ({page}) => {
+  const url = theme => `${baseUrl}/device-settings?ui=1&deviceId=scale-1&deviceName=Skale&embed=1&theme=${theme}`;
+  const look = () => page.evaluate(() => ({
+    scheme: getComputedStyle(document.documentElement).colorScheme,
+    page: getComputedStyle(document.querySelector('.pu-page')).backgroundColor,
+    body: getComputedStyle(document.body).backgroundColor,
+    done: getComputedStyle(document.querySelector('[data-pu-done]')).display,
+  }));
+  await page.goto(url('dark'));
+  expect(await look()).toEqual({scheme: 'normal', page: 'rgb(16, 18, 23)', body: 'rgba(0, 0, 0, 0)', done: 'none'});
+  await page.goto(url('light'));
+  expect(await look()).toEqual({scheme: 'normal', page: 'rgb(255, 255, 255)', body: 'rgba(0, 0, 0, 0)', done: 'none'});
+
+  const hostUrl = page.url();
+  await page.setContent(`<iframe sandbox="allow-scripts allow-same-origin allow-forms" src="${url('dark')}" style="width:800px;height:600px;border:0;background:#fff"></iframe>`);
+  const frame = page.frameLocator('iframe');
+  await expect(frame.locator('#deviceLabel')).toHaveText('Skale');
+  await expect(frame.locator('#save')).toBeEnabled();
+  await expect(frame.locator('#usbPower')).toBeVisible();
+  const square = frame.locator('#squareButtonShot');
+  await expect(square).toBeVisible();
+  await square.setChecked(!(await square.isChecked()));
+  const expected = await square.isChecked();
+  await frame.locator('#save').click();
+  await expect(frame.locator('#status')).toHaveText('Saved');
+  expect(page.url()).toBe(hostUrl);
+  await expect(page.locator('iframe')).toHaveCount(1);
+  expect(JSON.parse(JSON.stringify(await plugin.handleHttpRequest({method: 'GET', query: {deviceId: 'scale-1'}}))).body)
+    .toContain(`"squareButtonShot":${expected}`);
 });
 
 test('rejects malformed settings values', async ({request}) => {
