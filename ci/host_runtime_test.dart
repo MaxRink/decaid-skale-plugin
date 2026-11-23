@@ -218,6 +218,31 @@ void main() {
     expect(decide('DE1'), PluginBleOwnership.native);
     expect(decide(null), PluginBleOwnership.native);
     expect(decide(null, nameComplete: false), PluginBleOwnership.pending);
+
+    // A service UUID alone must not claim a nameless or differently named
+    // device, even when the advertised service list is complete.
+    final matcher = manifest.drivers.single.ble!;
+    for (final name in <String?>[null, 'Decent Scale']) {
+      expect(
+        matcher.evaluate(
+          name: name,
+          nameComplete: true,
+          serviceUuids: const [_service],
+          servicesComplete: true,
+        ),
+        PluginBleMatch.noMatch,
+      );
+      final decision = manager.bleService.registry.decide(
+        BleAdvertisementEvidence(
+          name: name,
+          nameComplete: true,
+          serviceUuids: const [_service],
+          servicesComplete: true,
+        ),
+      );
+      expect(decision.kind, PluginBleOwnership.native);
+      expect(decision.drivers, isEmpty);
+    }
   });
 
   test('settings surface uses host storage and survives plugin reload', () async {
